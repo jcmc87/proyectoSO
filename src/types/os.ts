@@ -9,12 +9,13 @@ export type SchedulerAlgorithm =
   | 'GUARANTEED'
   | 'MULTILEVEL_QUEUE';
 
-export type PageReplacementAlgorithm = 'FIFO' | 'LRU';
+export type PageReplacementAlgorithm = 'FIFO' | 'LRU' | 'CLOCK';
 
 export interface PageEntry {
   pageNumber: number;
   frameNumber: number | null; // null si no está en RAM
   inRAM: boolean;
+  referenceBit: number;       // 1 o 0 para Reloj / Segunda Oportunidad
   lastAccessTick?: number;    // Para LRU
   allocatedAtTick?: number;   // Para FIFO
 }
@@ -41,6 +42,7 @@ export interface Frame {
   processName: string | null;
   color: string | null;
   pageNumber: number | null;
+  referenceBit: number;    // 1 o 0 para Reloj / Segunda Oportunidad
   allocatedAtTick: number; // Para FIFO
   lastAccessTick: number;  // Para LRU
 }
@@ -53,6 +55,11 @@ export interface ScheduledTask {
   arrivalTime: number;
   priority: number;
   color: string;
+}
+
+export interface GanttEntry {
+  tick: number;
+  states: Record<string, 'EJECUCION' | 'LISTO' | 'BLOQUEADO' | 'INACTIVO'>;
 }
 
 export interface OSConfig {

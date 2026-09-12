@@ -16,6 +16,8 @@ export interface TickOutput {
   nextTick: number;
   processes: ProcessItem[];
   frames: Frame[];
+  executedProcessName: string | null;
+  executedProcessId: string | null;
 }
 
 /**
@@ -79,8 +81,14 @@ export function executeClockTick(input: TickInput): TickOutput {
     }
   }
 
+  let executedProcessName: string | null = null;
+  let executedProcessId: string | null = null;
+
   // 4. EJECUCIÓN DEL CICLO EN CPU
   if (running) {
+    executedProcessName = running.name;
+    executedProcessId = running.id;
+
     running.remainingBurst -= 1;
     running.quantumUsed += 1;
 
@@ -112,5 +120,7 @@ export function executeClockTick(input: TickInput): TickOutput {
     nextTick,
     processes: nextProcs,
     frames: nextFrames,
+    executedProcessName,
+    executedProcessId,
   };
 }

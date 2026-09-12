@@ -5,8 +5,10 @@ import type {
   PageReplacementAlgorithm,
   Frame,
   ScheduledTask,
+  GanttEntry,
 } from './types/os';
 import { executeClockTick } from './algorithms/engine';
+import { getClockHandPointer, resetClockHandPointer } from './algorithms/mmu';
 import {
   Play,
   Pause,
@@ -26,15 +28,17 @@ import {
   LogOut,
   Power,
   Sparkles,
+  BarChart3,
 } from 'lucide-react';
 
 const COLORS = ['#2563EB', '#E11D48', '#059669', '#D97706', '#7C3AED', '#0284C7'];
 
 const INITIAL_SCHEDULE: ScheduledTask[] = [
-  { id: '1', name: 'Word (Instancia 1)', burst: 1, pagesCount: 2, arrivalTime: 0, priority: 3, color: '#2563EB' },
-  { id: '2', name: 'Chrome', burst: 4, pagesCount: 3, arrivalTime: 1, priority: 1, color: '#E11D48' },
-  { id: '3', name: 'Word (Instancia 2)', burst: 10, pagesCount: 2, arrivalTime: 3, priority: 3, color: '#2563EB' },
-  { id: '4', name: 'Spotify', burst: 3, pagesCount: 2, arrivalTime: 5, priority: 5, color: '#059669' },
+  { id: '1', name: 'Proceso A', burst: 7, pagesCount: 2, arrivalTime: 0, priority: 3, color: '#84CC16' },
+  { id: '2', name: 'Proceso B', burst: 5, pagesCount: 3, arrivalTime: 2, priority: 1, color: '#E11D48' },
+  { id: '3', name: 'Proceso C', burst: 10, pagesCount: 2, arrivalTime: 2, priority: 4, color: '#2563EB' },
+  { id: '4', name: 'Proceso D', burst: 4, pagesCount: 2, arrivalTime: 6, priority: 2, color: '#D97706' },
+  { id: '5', name: 'Proceso E', burst: 1, pagesCount: 1, arrivalTime: 7, priority: 5, color: '#059669' },
 ];
 
 export const ALGORITHM_INFO: Record<
@@ -78,6 +82,27 @@ export const ALGORITHM_INFO: Record<
   },
 };
 
+export const PAGE_REPLACEMENT_INFO: Record<
+  PageReplacementAlgorithm,
+  { name: string; icon: string; desc: string }
+> = {
+  CLOCK: {
+    name: 'Reloj / Segunda Oportunidad (Clock)',
+    icon: '⏰',
+    desc: 'Usa una manecilla circular y un bit de referencia (R=1). Da una segunda oportunidad antes de desalojar.',
+  },
+  LRU: {
+    name: 'LRU (Least Recently Used)',
+    icon: '🧠',
+    desc: 'Desaloja el marco que lleva más tiempo sin ser consultado o accedido por la CPU.',
+  },
+  FIFO: {
+    name: 'FIFO (First-In, First-Out)',
+    icon: '➡️',
+    desc: 'Desaloja la página más antigua cargada en memoria física en orden estricto de llegada.',
+  },
+};
+
 export function App() {
   // Navegación por Pantallas: 'CONFIG' (Pantalla 1) | 'TASKS' (Pantalla 2) | 'EMULATOR' (Pantalla 3)
   const [currentScreen, setCurrentScreen] = useState<'CONFIG' | 'TASKS' | 'EMULATOR'>('CONFIG');
@@ -86,8 +111,8 @@ export function App() {
   // =========================================================================
   // PANTALLA 1: CONFIGURACIÓN DEL SISTEMA OPERATIVO Y MEMORIA RAM
   // =========================================================================
-  const [algorithm, setAlgorithm] = useState<SchedulerAlgorithm>('ROUND_ROBIN');
-  const [pageReplacement, setPageReplacement] = useState<PageReplacementAlgorithm>('LRU');
+  const [algorithm, setAlgorithm] = useState<SchedulerAlgorithm>('FIFO');
+  const [pageReplacement, setPageReplacement] = useState<PageReplacementAlgorithm>('CLOCK');
   const [quantum, setQuantum] = useState<number>(3);
   const [totalFramesCount, setTotalFramesCount] = useState<number>(8);
   const [pageSizeKB, setPageSizeKB] = useState<number>(4);
@@ -97,19 +122,20 @@ export function App() {
   // PANTALLA 2: LISTA DE TAREAS / PROCESOS (LISTA DETERMINISTA)
   // =========================================================================
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>(INITIAL_SCHEDULE);
-  const [newName, setNewName] = useState<string>('Photoshop');
+  const [newName, setNewName] = useState<string>('Proceso F');
   const [newBurst, setNewBurst] = useState<number>(5);
   const [newPages, setNewPages] = useState<number>(2);
-  const [newArrival, setNewArrival] = useState<number>(2);
-  const [newPriority, setNewPriority] = useState<number>(2);
+  const [newArrival, setNewArrival] = useState<number>(8);
+  const [newPriority, setNewPriority] = useState<number>(3);
 
   // =========================================================================
-  // PANTALLA 3: ESTADO DEL EMULADOR EN VIVO
+  // PANTALLA 3: ESTADO DEL EMULADOR EN VIVO & DIAGRAMA DE GANTT
   // =========================================================================
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [currentTick, setCurrentTick] = useState<number>(0);
   const [selectedProcessId, setSelectedProcessId] = useState<string | null>(null);
   const [processes, setProcesses] = useState<ProcessItem[]>([]);
+  const [ganttHistory, setGanttHistory] = useState<GanttEntry[]>([]);
   const [frames, setFrames] = useState<Frame[]>(() =>
     Array.from({ length: 8 }, (_, i) => ({
       id: i,
@@ -117,6 +143,7 @@ export function App() {
       processName: null,
       color: null,
       pageNumber: null,
+      referenceBit: 0,
       allocatedAtTick: 0,
       lastAccessTick: 0,
     }))
@@ -132,6 +159,7 @@ export function App() {
     pageReplacement,
     quantum,
     totalFramesCount,
+    ganttHistory,
   });
 
   stateRef.current = {
@@ -143,10 +171,12 @@ export function App() {
     pageReplacement,
     quantum,
     totalFramesCount,
+    ganttHistory,
   };
 
   // Actualizar marcos de RAM cuando cambia totalFramesCount
   useEffect(() => {
+    resetClockHandPointer();
     setFrames(
       Array.from({ length: totalFramesCount }, (_, i) => ({
         id: i,
@@ -154,6 +184,7 @@ export function App() {
         processName: null,
         color: null,
         pageNumber: null,
+        referenceBit: 0,
         allocatedAtTick: 0,
         lastAccessTick: 0,
       }))
@@ -161,7 +192,7 @@ export function App() {
   }, [totalFramesCount]);
 
   /**
-   * Ejecutar 1 Tick de Reloj invocando el motor de algoritmos
+   * Ejecutar 1 Tick de Reloj invocando el motor de algoritmos y actualizando Gantt
    */
   const stepClock = () => {
     const result = executeClockTick({
@@ -174,9 +205,32 @@ export function App() {
       quantum: stateRef.current.quantum,
     });
 
+    // Registrar estado del Diagrama de Gantt para este tick
+    const tickStates: Record<string, 'EJECUCION' | 'LISTO' | 'BLOQUEADO' | 'INACTIVO'> = {};
+    stateRef.current.scheduledTasks.forEach(task => {
+      if (result.executedProcessName === task.name) {
+        tickStates[task.name] = 'EJECUCION';
+      } else {
+        const proc = result.processes.find(
+          p => p.name === task.name && (p.state === 'LISTO' || p.state === 'BLOQUEADO')
+        );
+        if (proc) {
+          tickStates[task.name] = proc.state === 'LISTO' ? 'LISTO' : 'BLOQUEADO';
+        } else {
+          tickStates[task.name] = 'INACTIVO';
+        }
+      }
+    });
+
+    const newGanttEntry: GanttEntry = {
+      tick: result.nextTick,
+      states: tickStates,
+    };
+
     setCurrentTick(result.nextTick);
     setProcesses(result.processes);
     setFrames(result.frames);
+    setGanttHistory(prev => [...prev, newGanttEntry]);
   };
 
   // Temporizador con setInterval
@@ -198,7 +252,9 @@ export function App() {
   const handleReset = () => {
     setIsRunning(false);
     setCurrentTick(0);
+    resetClockHandPointer();
     setProcesses([]);
+    setGanttHistory([]);
     setFrames(
       Array.from({ length: totalFramesCount }, (_, i) => ({
         id: i,
@@ -206,6 +262,7 @@ export function App() {
         processName: null,
         color: null,
         pageNumber: null,
+        referenceBit: 0,
         allocatedAtTick: 0,
         lastAccessTick: 0,
       }))
@@ -277,6 +334,15 @@ export function App() {
     ? processes.find(p => p.id === selectedProcessId)
     : processes.find(p => p.state === 'EJECUCION') || processes[0];
 
+  const currentClockPointer = getClockHandPointer();
+
+  // Número total de columnas para el Diagrama de Gantt (mínimo 30 como en la imagen)
+  const totalGanttColumns = Math.max(30, currentTick + 2);
+  const ganttTicksArray = Array.from({ length: totalGanttColumns }, (_, i) => i + 1);
+
+  // Lista única de procesos programados
+  const uniqueProcessList = Array.from(new Set(scheduledTasks.map(t => t.name)));
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-6 font-sans flex flex-col justify-between relative">
       {/* ========================================================================= */}
@@ -318,7 +384,7 @@ export function App() {
         </div>
       )}
 
-      <div className="max-w-5xl mx-auto w-full space-y-6">
+      <div className="max-w-6xl mx-auto w-full space-y-6">
         {/* ========================================================================= */}
         {/* HEADER Y NAVEGADOR DE PANTALLAS (PASOS 1, 2 Y 3) */}
         {/* ========================================================================= */}
@@ -333,7 +399,7 @@ export function App() {
                   Emulador de Task Manager y MMU
                 </h1>
                 <p className="text-xs text-slate-400">
-                  Planificación de CPU (7 Algoritmos) y Administración de Memoria Virtual Paginada
+                  Planificación de CPU con Diagrama de Gantt y Paginación Virtual de Reloj
                 </p>
               </div>
             </div>
@@ -403,7 +469,7 @@ export function App() {
                   PANTALLA 1: CONFIGURACIÓN DE MEMORIA Y ALGORITMOS
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Ajusta la capacidad de memoria RAM, marcos de página y selecciona el algoritmo de planificación.
+                  Ajusta la capacidad de memoria RAM, marcos de página y selecciona los algoritmos de CPU y MMU.
                 </p>
               </div>
               <span className="text-xs bg-blue-500/20 text-blue-300 font-bold px-3 py-1 rounded-full border border-blue-500/30">
@@ -461,13 +527,14 @@ export function App() {
                   <select
                     value={pageReplacement}
                     onChange={e => setPageReplacement(e.target.value as PageReplacementAlgorithm)}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-semibold"
+                    className="w-full bg-slate-900 border border-emerald-500/50 rounded-lg p-2 text-emerald-400 font-bold"
                   >
-                    <option value="LRU">LRU (Menos usado recientemente)</option>
-                    <option value="FIFO">FIFO (Primero en entrar, primero en salir)</option>
+                    <option value="CLOCK">⏰ Reloj / Segunda Oportunidad (Clock / Second Chance)</option>
+                    <option value="LRU">🧠 LRU (Menos usado recientemente)</option>
+                    <option value="FIFO">➡️ FIFO (Primero en entrar, primero en salir)</option>
                   </select>
-                  <span className="text-[11px] text-slate-500 mt-1 block">
-                    Política ejecutada cuando la RAM está llena y se requiere cargar una nueva página.
+                  <span className="text-[11px] text-emerald-300/90 mt-1 block font-medium">
+                    {PAGE_REPLACEMENT_INFO[pageReplacement].desc}
                   </span>
                 </div>
               </div>
@@ -488,13 +555,13 @@ export function App() {
                     onChange={e => setAlgorithm(e.target.value as SchedulerAlgorithm)}
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-blue-400 font-bold"
                   >
+                    <option value="FIFO">➡️ FIFO / FCFS (Orden de llegada)</option>
                     <option value="ROUND_ROBIN">🔄 Round Robin (Apropiativo por Quantum)</option>
                     <option value="SJF">⏱️ Proceso Más Corto (Shortest Job First / SJF)</option>
                     <option value="PRIORITY">⭐ Por Prioridad (1 = Máxima)</option>
                     <option value="MULTILEVEL_QUEUE">🥞 Multicola / Colas Multinivel (MLQ)</option>
                     <option value="GUARANTEED">⚖️ Planificación Garantizada (Equitativa 1/n)</option>
                     <option value="LOTTERY">🎟️ Planificación por Sorteo / Lotería</option>
-                    <option value="FIFO">➡️ FIFO / FCFS (Orden de llegada)</option>
                   </select>
                   <span className="text-[11px] text-amber-300/90 mt-1 block font-medium">
                     {ALGORITHM_INFO[algorithm].desc}
@@ -591,13 +658,13 @@ export function App() {
                   onChange={e => setAlgorithm(e.target.value as SchedulerAlgorithm)}
                   className="bg-slate-900 border border-blue-700 text-blue-300 font-bold text-xs rounded-lg px-3 py-1.5 focus:outline-none"
                 >
+                  <option value="FIFO">➡️ FIFO / FCFS</option>
                   <option value="ROUND_ROBIN">🔄 Round Robin</option>
                   <option value="SJF">⏱️ Proceso Más Corto (SJF)</option>
                   <option value="PRIORITY">⭐ Por Prioridad</option>
                   <option value="MULTILEVEL_QUEUE">🥞 Multicola (MLQ)</option>
                   <option value="GUARANTEED">⚖️ Planificación Garantizada</option>
                   <option value="LOTTERY">🎟️ Por Sorteo / Lotería</option>
-                  <option value="FIFO">➡️ FIFO / FCFS</option>
                 </select>
               </div>
 
@@ -621,12 +688,12 @@ export function App() {
                     onClick={() => setScheduledTasks(INITIAL_SCHEDULE)}
                     className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg"
                   >
-                    Estándar
+                    Estándar (A, B, C, D, E)
                   </button>
                   <button
                     onClick={() => setScheduledTasks([
-                      { id: '1', name: 'Word (1s)', burst: 1, pagesCount: 2, arrivalTime: 0, priority: 3, color: '#2563EB' },
-                      { id: '2', name: 'Word (10s)', burst: 10, pagesCount: 2, arrivalTime: 2, priority: 3, color: '#2563EB' },
+                      { id: '1', name: 'Word (1s)', burst: 1, pagesCount: 2, arrivalTime: 0, priority: 3, color: '#84CC16' },
+                      { id: '2', name: 'Word (10s)', burst: 10, pagesCount: 2, arrivalTime: 2, priority: 3, color: '#84CC16' },
                       { id: '3', name: 'Chrome (4s)', burst: 4, pagesCount: 3, arrivalTime: 3, priority: 1, color: '#E11D48' },
                     ])}
                     className="px-2 py-1 bg-blue-900/40 hover:bg-blue-900/60 text-blue-300 rounded-lg font-bold"
@@ -643,7 +710,7 @@ export function App() {
                     type="text"
                     value={newName}
                     onChange={e => setNewName(e.target.value)}
-                    placeholder="ej. Word, Chrome"
+                    placeholder="ej. Proceso F"
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-medium"
                     required
                   />
@@ -788,11 +855,11 @@ export function App() {
         )}
 
         {/* ========================================================================= */}
-        {/* PANTALLA 3: EMULADOR EN VIVO (TASK MANAGER & MMU) */}
+        {/* PANTALLA 3: EMULADOR EN VIVO (TASK MANAGER, GANTT & MMU) */}
         {/* ========================================================================= */}
         {currentScreen === 'EMULATOR' && (
-          <div className="space-y-5">
-            {/* Barra de Control de Simulación y Selector de Algoritmo en Caliente */}
+          <div className="space-y-6">
+            {/* Barra de Control de Simulación y Selectores en Caliente */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
               <div className="flex flex-wrap items-center gap-2">
                 <button
@@ -819,7 +886,7 @@ export function App() {
                 <button
                   onClick={handleReset}
                   className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-900/40 text-xs font-semibold text-slate-300 hover:text-rose-300 border border-slate-700 transition flex items-center gap-1"
-                  title="Reiniciar reloj y memoria"
+                  title="Reiniciar reloj, Gantt y memoria"
                 >
                   <RotateCcw className="w-4 h-4" />
                   <span>Reiniciar</span>
@@ -842,22 +909,37 @@ export function App() {
                 </button>
               </div>
 
-              {/* Selector de Algoritmo en Caliente */}
-              <div className="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 text-xs">
-                <span className="text-slate-400 font-semibold">Algoritmo CPU:</span>
-                <select
-                  value={algorithm}
-                  onChange={e => setAlgorithm(e.target.value as SchedulerAlgorithm)}
-                  className="bg-slate-900 border border-slate-700 text-blue-400 font-bold rounded-lg px-2.5 py-1 focus:outline-none"
-                >
-                  <option value="ROUND_ROBIN">🔄 Round Robin</option>
-                  <option value="SJF">⏱️ Proceso Más Corto (SJF)</option>
-                  <option value="PRIORITY">⭐ Por Prioridad</option>
-                  <option value="MULTILEVEL_QUEUE">🥞 Multicola (MLQ)</option>
-                  <option value="GUARANTEED">⚖️ Garantizada</option>
-                  <option value="LOTTERY">🎟️ Por Sorteo</option>
-                  <option value="FIFO">➡️ FIFO</option>
-                </select>
+              {/* Selectores de Algoritmos en Caliente (CPU y MMU) */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1.5 bg-slate-950 px-2.5 py-1.5 rounded-xl border border-slate-800 text-xs">
+                  <span className="text-slate-400 font-semibold">CPU:</span>
+                  <select
+                    value={algorithm}
+                    onChange={e => setAlgorithm(e.target.value as SchedulerAlgorithm)}
+                    className="bg-slate-900 border border-slate-700 text-blue-400 font-bold rounded-lg px-2 py-0.5 focus:outline-none"
+                  >
+                    <option value="FIFO">➡️ FIFO</option>
+                    <option value="ROUND_ROBIN">🔄 Round Robin</option>
+                    <option value="SJF">⏱️ SJF</option>
+                    <option value="PRIORITY">⭐ Prioridad</option>
+                    <option value="MULTILEVEL_QUEUE">🥞 Multicola</option>
+                    <option value="GUARANTEED">⚖️ Garantizada</option>
+                    <option value="LOTTERY">🎟️ Sorteo</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-1.5 bg-slate-950 px-2.5 py-1.5 rounded-xl border border-slate-800 text-xs">
+                  <span className="text-slate-400 font-semibold">MMU:</span>
+                  <select
+                    value={pageReplacement}
+                    onChange={e => setPageReplacement(e.target.value as PageReplacementAlgorithm)}
+                    className="bg-slate-900 border border-slate-700 text-emerald-400 font-bold rounded-lg px-2 py-0.5 focus:outline-none"
+                  >
+                    <option value="CLOCK">⏰ Reloj (2ª Oport.)</option>
+                    <option value="LRU">🧠 LRU</option>
+                    <option value="FIFO">➡️ FIFO</option>
+                  </select>
+                </div>
               </div>
 
               {/* Botones para volver a editar tareas o Salir */}
@@ -894,6 +976,102 @@ export function App() {
                 </button>
               </div>
             </div>
+
+            {/* ========================================================================= */}
+            {/* DIAGRAMA DE GANTT DE PLANIFICACIÓN DE CPU EN TIEMPO REAL */}
+            {/* ========================================================================= */}
+            <section className="bg-[#1e293b]/90 border border-slate-700/80 rounded-2xl p-5 shadow-2xl space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-700/60 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <BarChart3 className="w-5 h-5 text-lime-400" />
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+                    Diagrama de Gantt (Planificación de CPU)
+                  </h3>
+                </div>
+
+                {/* Leyenda del Diagrama de Gantt */}
+                <div className="flex flex-wrap items-center gap-4 text-xs font-medium">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-4 h-4 bg-[#84cc16] border border-white/20 rounded-sm shadow-sm" />
+                    <span className="text-slate-200">= En ejecución</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-4 h-4 bg-[#facc15] border border-white/20 rounded-sm shadow-sm" />
+                    <span className="text-slate-200">= En espera (Listo)</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-4 h-4 bg-[#f97316] border border-white/20 rounded-sm shadow-sm" />
+                    <span className="text-slate-200">= En espera de E/S (Bloqueado)</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Matriz del Diagrama de Gantt */}
+              <div className="overflow-x-auto pb-2">
+                <div className="min-w-fit font-mono text-xs">
+                  {/* Fila de números de ticks (1, 2, 3, ... 30) */}
+                  <div className="flex items-center mb-1">
+                    <div className="w-28 sm:w-32 flex-shrink-0 text-slate-400 font-bold text-right pr-3 font-sans text-xs">
+                      Ticks:
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {ganttTicksArray.map(t => (
+                        <div
+                          key={t}
+                          className={`w-6 h-5 flex items-center justify-center text-[10px] font-bold ${
+                            t === currentTick ? 'text-lime-400 bg-slate-800 rounded' : 'text-slate-400'
+                          }`}
+                        >
+                          {t}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Filas por cada proceso (Proceso A, Proceso B, etc.) */}
+                  <div className="space-y-1">
+                    {uniqueProcessList.map(procName => (
+                      <div key={procName} className="flex items-center">
+                        {/* Nombre del Proceso */}
+                        <div className="w-28 sm:w-32 flex-shrink-0 font-bold text-white truncate pr-3 text-right text-xs font-sans">
+                          {procName}
+                        </div>
+
+                        {/* Celdas de la cuadrícula de Gantt */}
+                        <div className="flex items-center gap-1">
+                          {ganttTicksArray.map(t => {
+                            const entry = ganttHistory.find(g => g.tick === t);
+                            const state = entry ? entry.states[procName] : undefined;
+
+                            let bgClass = 'bg-slate-900/40 border-slate-700/80';
+                            let titleText = `Tick #${t} - ${procName}: Sin actividad`;
+
+                            if (state === 'EJECUCION') {
+                              bgClass = 'bg-[#84cc16] border-[#84cc16] shadow-sm';
+                              titleText = `Tick #${t} - ${procName}: En ejecución (CPU)`;
+                            } else if (state === 'LISTO') {
+                              bgClass = 'bg-[#facc15] border-[#facc15] shadow-sm';
+                              titleText = `Tick #${t} - ${procName}: En espera (Listo)`;
+                            } else if (state === 'BLOQUEADO') {
+                              bgClass = 'bg-[#f97316] border-[#f97316] shadow-sm';
+                              titleText = `Tick #${t} - ${procName}: En espera de E/S (Bloqueado)`;
+                            }
+
+                            return (
+                              <div
+                                key={t}
+                                className={`w-6 h-6 border rounded-sm transition-colors duration-150 flex items-center justify-center ${bgClass}`}
+                                title={titleText}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </section>
 
             {/* Task Manager (4 Colas con Código de Colores) */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
@@ -1075,37 +1253,70 @@ export function App() {
                       Memoria Física RAM ({totalFramesCount} Marcos)
                     </h3>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-400">
-                    {frames.filter(f => f.processId !== null).length}/{frames.length} marcos ocupados
-                  </span>
+                  <div className="flex items-center gap-2 text-[11px] font-mono">
+                    <span className="text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-500/30">
+                      MMU: {PAGE_REPLACEMENT_INFO[pageReplacement].name.split(' ')[0]}
+                    </span>
+                    <span className="text-slate-400">
+                      {frames.filter(f => f.processId !== null).length}/{frames.length} ocupados
+                    </span>
+                  </div>
                 </div>
 
-                {/* Grid de marcos */}
+                {/* Grid de marcos con indicador de Reloj / Segunda Oportunidad */}
                 <div className="grid grid-cols-4 gap-2">
-                  {frames.map(frame => (
-                    <div
-                      key={frame.id}
-                      className={`p-2 rounded-xl border text-center font-mono text-xs flex flex-col justify-between h-20 transition ${
-                        frame.processId !== null
-                          ? 'bg-slate-950 border-emerald-500/50 shadow-sm'
-                          : 'bg-slate-950/40 border-dashed border-slate-800 text-slate-600'
-                      }`}
-                    >
-                      <span className="text-[10px] text-slate-400 font-bold">Marco #{frame.id}</span>
-                      {frame.processId !== null ? (
-                        <div>
-                          <div className="font-bold text-white truncate text-[11px]">
-                            {frame.processName}
-                          </div>
-                          <div className="text-[10px] text-emerald-400 font-bold">
-                            Pág #{frame.pageNumber}
-                          </div>
+                  {frames.map(frame => {
+                    const isClockHandHere = pageReplacement === 'CLOCK' && frame.id === currentClockPointer;
+                    return (
+                      <div
+                        key={frame.id}
+                        className={`p-2 rounded-xl border text-center font-mono text-xs flex flex-col justify-between h-24 transition relative ${
+                          isClockHandHere
+                            ? 'ring-2 ring-amber-400 border-amber-400 bg-slate-900 shadow-md shadow-amber-500/20'
+                            : frame.processId !== null
+                            ? 'bg-slate-950 border-emerald-500/50 shadow-sm'
+                            : 'bg-slate-950/40 border-dashed border-slate-800 text-slate-600'
+                        }`}
+                      >
+                        {/* Indicador de Manecilla de Reloj */}
+                        {isClockHandHere && (
+                          <span className="absolute -top-2 -right-1 bg-amber-400 text-slate-950 text-[9px] font-black px-1.5 py-0.2 rounded-full shadow-sm">
+                            ⏰ Manecilla
+                          </span>
+                        )}
+
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] text-slate-400 font-bold">Marco #{frame.id}</span>
+                          {/* Bit de Referencia R */}
+                          {frame.processId !== null && (
+                            <span
+                              className={`text-[9px] font-bold px-1 py-0.2 rounded ${
+                                frame.referenceBit === 1
+                                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}
+                              title="Bit de Referencia R (Uso)"
+                            >
+                              R={frame.referenceBit}
+                            </span>
+                          )}
                         </div>
-                      ) : (
-                        <span className="text-[10px] text-slate-600 font-sans">Libre</span>
-                      )}
-                    </div>
-                  ))}
+
+                        {frame.processId !== null ? (
+                          <div>
+                            <div className="font-bold text-white truncate text-[11px]">
+                              {frame.processName}
+                            </div>
+                            <div className="text-[10px] text-emerald-400 font-bold">
+                              Pág #{frame.pageNumber}
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-[10px] text-slate-600 font-sans">Libre</span>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1132,6 +1343,7 @@ export function App() {
                         <tr>
                           <th className="p-2">Página Virtual</th>
                           <th className="p-2 text-center">Presencia (RAM)</th>
+                          <th className="p-2 text-center">Bit R (Uso)</th>
                           <th className="p-2 text-right">Marco Físico</th>
                         </tr>
                       </thead>
@@ -1150,6 +1362,21 @@ export function App() {
                                 <span className="text-amber-400 font-bold bg-amber-950/60 px-2 py-0.5 rounded text-[10px]">
                                   Inválida (En Disco)
                                 </span>
+                              )}
+                            </td>
+                            <td className="p-2 text-center">
+                              {pt.inRAM ? (
+                                <span
+                                  className={`font-bold px-1.5 py-0.5 rounded text-[10px] ${
+                                    pt.referenceBit === 1
+                                      ? 'bg-emerald-500/20 text-emerald-300'
+                                      : 'bg-slate-800 text-slate-400'
+                                  }`}
+                                >
+                                  {pt.referenceBit === 1 ? 'R=1 (2ª Oport.)' : 'R=0 (Candidato)'}
+                                </span>
+                              ) : (
+                                <span className="text-slate-600">—</span>
                               )}
                             </td>
                             <td className="p-2 text-right font-bold text-emerald-400">
