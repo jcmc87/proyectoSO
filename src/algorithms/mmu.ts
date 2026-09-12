@@ -88,8 +88,16 @@ export function selectVictimFrame(
 }
 
 /**
+ * Comprueba si un proceso tiene páginas virtuales no cargadas en memoria física RAM (Fallo de Página)
+ */
+export function checkProcessPageFault(proc: ProcessItem): boolean {
+  return proc.pageTable.some(page => !page.inRAM || page.frameNumber === null);
+}
+
+/**
  * Algoritmo de Asignación de Memoria MMU
  * Mapea cada página virtual del proceso activo a un Marco Físico en RAM.
+ * Retorna true si hubo al menos una página cargada desde disco (Fallo de Página).
  */
 export function assignProcessMemory(
   proc: ProcessItem,
@@ -97,7 +105,9 @@ export function assignProcessMemory(
   allProcesses: ProcessItem[],
   currentTick: number,
   algorithm: PageReplacementAlgorithm = 'LRU'
-): void {
+): boolean {
+  let hadPageFault = false;
+
   proc.pageTable.forEach(page => {
     if (page.inRAM && page.frameNumber !== null) {
       // Ya está en RAM, actualizar bit de referencia (Segunda Oportunidad) y timestamp (LRU)
@@ -110,6 +120,8 @@ export function assignProcessMemory(
       }
       return;
     }
+
+    hadPageFault = true;
 
     // 1. Buscar si hay marco libre en RAM
     let targetFrame = frames.find(f => f.processId === null);
@@ -147,6 +159,8 @@ export function assignProcessMemory(
     page.allocatedAtTick = currentTick;
     page.lastAccessTick = currentTick;
   });
+
+  return hadPageFault;
 }
 
 /**

@@ -32,6 +32,8 @@ export interface ProcessItem {
   arrivalTime: number;    // Instante t de llegada
   quantumUsed: number;
   blockedTicks: number;   // Ticks restantes en bloqueo I/O
+  blockReason?: 'PAGE_FAULT' | 'MANUAL_IO' | null;
+  pageFaultsCount?: number; // Contador de fallos de página
   pageTable: PageEntry[];
   lotteryTickets?: number; // Para planificación por sorteo
 }
@@ -60,6 +62,7 @@ export interface ScheduledTask {
 export interface GanttEntry {
   tick: number;
   states: Record<string, 'EJECUCION' | 'LISTO' | 'BLOQUEADO' | 'INACTIVO'>;
+  isQuantumStart?: Record<string, boolean>;
 }
 
 export interface OSConfig {

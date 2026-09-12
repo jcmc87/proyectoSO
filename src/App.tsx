@@ -8,7 +8,7 @@ import type {
   GanttEntry,
 } from './types/os';
 import { executeClockTick } from './algorithms/engine';
-import { getClockHandPointer, resetClockHandPointer } from './algorithms/mmu';
+import { getClockHandPointer, resetClockHandPointer, createPageTable } from './algorithms/mmu';
 import {
   Play,
   Pause,
@@ -34,11 +34,9 @@ import {
 const COLORS = ['#2563EB', '#E11D48', '#059669', '#D97706', '#7C3AED', '#0284C7'];
 
 const INITIAL_SCHEDULE: ScheduledTask[] = [
-  { id: '1', name: 'Proceso A', burst: 7, pagesCount: 2, arrivalTime: 0, priority: 3, color: '#84CC16' },
-  { id: '2', name: 'Proceso B', burst: 5, pagesCount: 3, arrivalTime: 2, priority: 1, color: '#E11D48' },
-  { id: '3', name: 'Proceso C', burst: 10, pagesCount: 2, arrivalTime: 2, priority: 4, color: '#2563EB' },
-  { id: '4', name: 'Proceso D', burst: 4, pagesCount: 2, arrivalTime: 6, priority: 2, color: '#D97706' },
-  { id: '5', name: 'Proceso E', burst: 1, pagesCount: 1, arrivalTime: 7, priority: 5, color: '#059669' },
+  { id: '1', name: 'A', burst: 4, pagesCount: 1, arrivalTime: 2, priority: 1, color: '#84CC16' },
+  { id: '2', name: 'B', burst: 2, pagesCount: 1, arrivalTime: 4, priority: 1, color: '#E11D48' },
+  { id: '3', name: 'C', burst: 4, pagesCount: 1, arrivalTime: 0, priority: 1, color: '#2563EB' },
 ];
 
 export const ALGORITHM_INFO: Record<
@@ -111,9 +109,9 @@ export function App() {
   // =========================================================================
   // PANTALLA 1: CONFIGURACIÓN DEL SISTEMA OPERATIVO Y MEMORIA RAM
   // =========================================================================
-  const [algorithm, setAlgorithm] = useState<SchedulerAlgorithm>('FIFO');
+  const [algorithm, setAlgorithm] = useState<SchedulerAlgorithm>('ROUND_ROBIN');
   const [pageReplacement, setPageReplacement] = useState<PageReplacementAlgorithm>('CLOCK');
-  const [quantum, setQuantum] = useState<number>(3);
+  const [quantum, setQuantum] = useState<number>(2);
   const [totalFramesCount, setTotalFramesCount] = useState<number>(8);
   const [pageSizeKB, setPageSizeKB] = useState<number>(4);
   const [clockSpeedMs, setClockSpeedMs] = useState<number>(800);
@@ -122,11 +120,11 @@ export function App() {
   // PANTALLA 2: LISTA DE TAREAS / PROCESOS (LISTA DETERMINISTA)
   // =========================================================================
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>(INITIAL_SCHEDULE);
-  const [newName, setNewName] = useState<string>('Proceso F');
-  const [newBurst, setNewBurst] = useState<number>(5);
-  const [newPages, setNewPages] = useState<number>(2);
-  const [newArrival, setNewArrival] = useState<number>(8);
-  const [newPriority, setNewPriority] = useState<number>(3);
+  const [newName, setNewName] = useState<string>('D');
+  const [newBurst, setNewBurst] = useState<number>(3);
+  const [newPages, setNewPages] = useState<number>(1);
+  const [newArrival, setNewArrival] = useState<number>(6);
+  const [newPriority, setNewPriority] = useState<number>(1);
 
   // =========================================================================
   // PANTALLA 3: ESTADO DEL EMULADOR EN VIVO & DIAGRAMA DE GANTT
@@ -191,13 +189,36 @@ export function App() {
     );
   }, [totalFramesCount]);
 
+  const createInitialProcesses = () => {
+    return scheduledTasks
+      .slice()
+      .sort((a, b) => a.arrivalTime - b.arrivalTime)
+      .map(task => ({
+        id: task.id,
+        name: task.name,
+        color: task.color,
+        burst: task.burst,
+        remainingBurst: task.burst,
+        priority: task.priority,
+        pagesCount: task.pagesCount,
+        state: 'LISTO' as const,
+        arrivalTime: task.arrivalTime,
+        quantumUsed: 0,
+        blockedTicks: 0,
+        blockReason: null,
+        pageFaultsCount: 0,
+        pageTable: createPageTable(task.pagesCount),
+      }));
+  };
+
   /**
    * Ejecutar 1 Tick de Reloj invocando el motor de algoritmos y actualizando Gantt
    */
   const stepClock = () => {
+    const tickToRecord = stateRef.current.currentTick;
     const result = executeClockTick({
       currentTick: stateRef.current.currentTick,
-      processes: stateRef.current.processes,
+      processes: stateRef.current.processes.length > 0 ? stateRef.current.processes : createInitialProcesses(),
       frames: stateRef.current.frames,
       scheduledTasks: stateRef.current.scheduledTasks,
       algorithm: stateRef.current.algorithm,
@@ -207,30 +228,44 @@ export function App() {
 
     // Registrar estado del Diagrama de Gantt para este tick
     const tickStates: Record<string, 'EJECUCION' | 'LISTO' | 'BLOQUEADO' | 'INACTIVO'> = {};
+    const isQuantumStart: Record<string, boolean> = {};
+
     stateRef.current.scheduledTasks.forEach(task => {
       if (result.executedProcessName === task.name) {
         tickStates[task.name] = 'EJECUCION';
+        const proc = result.processes.find(p => p.name === task.name);
+        if (proc && proc.quantumUsed === 1) {
+          isQuantumStart[task.name] = true;
+        }
       } else {
-        const proc = result.processes.find(
-          p => p.name === task.name && (p.state === 'LISTO' || p.state === 'BLOQUEADO')
-        );
+        const proc = result.processes.find(p => p.name === task.name);
         if (proc) {
-          tickStates[task.name] = proc.state === 'LISTO' ? 'LISTO' : 'BLOQUEADO';
+          if (proc.state === 'TERMINADO' || proc.remainingBurst <= 0) {
+            tickStates[task.name] = 'INACTIVO';
+          } else if (proc.state === 'BLOQUEADO') {
+            tickStates[task.name] = 'BLOQUEADO';
+          } else {
+            tickStates[task.name] = 'LISTO';
+          }
         } else {
-          tickStates[task.name] = 'INACTIVO';
+          tickStates[task.name] = 'LISTO';
         }
       }
     });
 
     const newGanttEntry: GanttEntry = {
-      tick: result.nextTick,
+      tick: tickToRecord,
       states: tickStates,
+      isQuantumStart,
     };
 
     setCurrentTick(result.nextTick);
     setProcesses(result.processes);
     setFrames(result.frames);
-    setGanttHistory(prev => [...prev, newGanttEntry]);
+    setGanttHistory(prev => {
+      const filtered = prev.filter(e => e.tick !== tickToRecord);
+      return [...filtered, newGanttEntry];
+    });
   };
 
   // Temporizador con setInterval
@@ -253,7 +288,7 @@ export function App() {
     setIsRunning(false);
     setCurrentTick(0);
     resetClockHandPointer();
-    setProcesses([]);
+    setProcesses(createInitialProcesses());
     setGanttHistory([]);
     setFrames(
       Array.from({ length: totalFramesCount }, (_, i) => ({
@@ -293,6 +328,7 @@ export function App() {
             ...p,
             state: 'BLOQUEADO' as const,
             blockedTicks: 3,
+            blockReason: 'MANUAL_IO' as const,
             quantumUsed: 0,
           };
         }
@@ -324,7 +360,24 @@ export function App() {
 
   // Iniciar la emulación desde la pantalla 2
   const startEmulation = () => {
-    handleReset();
+    setIsRunning(false);
+    setCurrentTick(0);
+    resetClockHandPointer();
+    setProcesses(createInitialProcesses());
+    setGanttHistory([]);
+    setFrames(
+      Array.from({ length: totalFramesCount }, (_, i) => ({
+        id: i,
+        processId: null,
+        processName: null,
+        color: null,
+        pageNumber: null,
+        referenceBit: 0,
+        allocatedAtTick: 0,
+        lastAccessTick: 0,
+      }))
+    );
+    setSelectedProcessId(null);
     setCurrentScreen('EMULATOR');
     setIsRunning(true);
   };
@@ -336,9 +389,9 @@ export function App() {
 
   const currentClockPointer = getClockHandPointer();
 
-  // Número total de columnas para el Diagrama de Gantt (mínimo 30 como en la imagen)
+  // Número total de columnas para el Diagrama de Gantt (mínimo 30 comenzando en 0)
   const totalGanttColumns = Math.max(30, currentTick + 2);
-  const ganttTicksArray = Array.from({ length: totalGanttColumns }, (_, i) => i + 1);
+  const ganttTicksArray = Array.from({ length: totalGanttColumns }, (_, i) => i);
 
   // Lista única de procesos programados
   const uniqueProcessList = Array.from(new Set(scheduledTasks.map(t => t.name)));
@@ -650,22 +703,40 @@ export function App() {
 
             {/* Selector de Algoritmo en Pantalla 2 */}
             <div className="bg-blue-950/30 border border-blue-800/40 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-amber-400" />
-                <span className="text-xs text-white font-bold">Algoritmo a usar:</span>
-                <select
-                  value={algorithm}
-                  onChange={e => setAlgorithm(e.target.value as SchedulerAlgorithm)}
-                  className="bg-slate-900 border border-blue-700 text-blue-300 font-bold text-xs rounded-lg px-3 py-1.5 focus:outline-none"
-                >
-                  <option value="FIFO">➡️ FIFO / FCFS</option>
-                  <option value="ROUND_ROBIN">🔄 Round Robin</option>
-                  <option value="SJF">⏱️ Proceso Más Corto (SJF)</option>
-                  <option value="PRIORITY">⭐ Por Prioridad</option>
-                  <option value="MULTILEVEL_QUEUE">🥞 Multicola (MLQ)</option>
-                  <option value="GUARANTEED">⚖️ Planificación Garantizada</option>
-                  <option value="LOTTERY">🎟️ Por Sorteo / Lotería</option>
-                </select>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  <span className="text-xs text-white font-bold">Algoritmo a usar:</span>
+                  <select
+                    value={algorithm}
+                    onChange={e => setAlgorithm(e.target.value as SchedulerAlgorithm)}
+                    className="bg-slate-900 border border-blue-700 text-blue-300 font-bold text-xs rounded-lg px-3 py-1.5 focus:outline-none"
+                  >
+                    <option value="FIFO">➡️ FIFO / FCFS</option>
+                    <option value="ROUND_ROBIN">🔄 Round Robin</option>
+                    <option value="SJF">⏱️ Proceso Más Corto (SJF)</option>
+                    <option value="PRIORITY">⭐ Por Prioridad</option>
+                    <option value="MULTILEVEL_QUEUE">🥞 Multicola (MLQ)</option>
+                    <option value="GUARANTEED">⚖️ Planificación Garantizada</option>
+                    <option value="LOTTERY">🎟️ Por Sorteo / Lotería</option>
+                  </select>
+                </div>
+
+                {/* Si es Round Robin o Multicola, solicitar el Quantum */}
+                {(algorithm === 'ROUND_ROBIN' || algorithm === 'MULTILEVEL_QUEUE') && (
+                  <div className="flex items-center gap-2 bg-slate-900/90 px-3 py-1 rounded-lg border border-amber-500/50 shadow-sm">
+                    <span className="text-xs text-amber-300 font-bold">Quantum (q):</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="20"
+                      value={quantum}
+                      onChange={e => setQuantum(Math.max(1, Number(e.target.value)))}
+                      className="w-14 bg-slate-950 border border-slate-700 rounded px-2 py-0.5 text-amber-400 font-mono font-bold text-xs text-center focus:outline-none focus:border-amber-400"
+                    />
+                    <span className="text-[10px] text-slate-400 font-mono">ticks</span>
+                  </div>
+                )}
               </div>
 
               <div className="text-xs text-slate-400">
@@ -682,23 +753,35 @@ export function App() {
                 </h3>
 
                 {/* Presets rápidos */}
-                <div className="flex items-center gap-2 text-xs">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
                   <span className="text-slate-500">Plantillas de prueba:</span>
                   <button
-                    onClick={() => setScheduledTasks(INITIAL_SCHEDULE)}
-                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg"
+                    type="button"
+                    onClick={() => {
+                      setScheduledTasks([
+                        { id: '1', name: 'A', burst: 4, pagesCount: 1, arrivalTime: 2, priority: 1, color: '#84CC16' },
+                        { id: '2', name: 'B', burst: 2, pagesCount: 1, arrivalTime: 4, priority: 1, color: '#E11D48' },
+                        { id: '3', name: 'C', burst: 4, pagesCount: 1, arrivalTime: 0, priority: 1, color: '#2563EB' },
+                      ]);
+                      setAlgorithm('ROUND_ROBIN');
+                      setQuantum(2);
+                    }}
+                    className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg font-bold border border-amber-500/40 shadow-sm"
                   >
-                    Estándar (A, B, C, D, E)
+                    ⭐ Ejemplo Imagen (Q=2: A, B, C)
                   </button>
                   <button
+                    type="button"
                     onClick={() => setScheduledTasks([
-                      { id: '1', name: 'Word (1s)', burst: 1, pagesCount: 2, arrivalTime: 0, priority: 3, color: '#84CC16' },
-                      { id: '2', name: 'Word (10s)', burst: 10, pagesCount: 2, arrivalTime: 2, priority: 3, color: '#84CC16' },
-                      { id: '3', name: 'Chrome (4s)', burst: 4, pagesCount: 3, arrivalTime: 3, priority: 1, color: '#E11D48' },
+                      { id: '1', name: 'Proceso A', burst: 7, pagesCount: 2, arrivalTime: 0, priority: 3, color: '#84CC16' },
+                      { id: '2', name: 'Proceso B', burst: 5, pagesCount: 3, arrivalTime: 2, priority: 1, color: '#E11D48' },
+                      { id: '3', name: 'Proceso C', burst: 10, pagesCount: 2, arrivalTime: 2, priority: 4, color: '#2563EB' },
+                      { id: '4', name: 'Proceso D', burst: 4, pagesCount: 2, arrivalTime: 6, priority: 2, color: '#D97706' },
+                      { id: '5', name: 'Proceso E', burst: 1, pagesCount: 1, arrivalTime: 7, priority: 5, color: '#059669' },
                     ])}
-                    className="px-2 py-1 bg-blue-900/40 hover:bg-blue-900/60 text-blue-300 rounded-lg font-bold"
+                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg"
                   >
-                    Word 1s + Word 10s
+                    Estándar (5 procesos)
                   </button>
                 </div>
               </div>
@@ -926,6 +1009,19 @@ export function App() {
                     <option value="GUARANTEED">⚖️ Garantizada</option>
                     <option value="LOTTERY">🎟️ Sorteo</option>
                   </select>
+                  {(algorithm === 'ROUND_ROBIN' || algorithm === 'MULTILEVEL_QUEUE') && (
+                    <div className="flex items-center gap-1 pl-1 border-l border-slate-800">
+                      <span className="text-amber-400 font-bold">Q:</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="20"
+                        value={quantum}
+                        onChange={e => setQuantum(Math.max(1, Number(e.target.value)))}
+                        className="w-10 bg-slate-900 border border-slate-700 rounded px-1 text-center text-amber-300 font-mono font-bold text-xs"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-1.5 bg-slate-950 px-2.5 py-1.5 rounded-xl border border-slate-800 text-xs">
@@ -992,8 +1088,10 @@ export function App() {
                 {/* Leyenda del Diagrama de Gantt */}
                 <div className="flex flex-wrap items-center gap-4 text-xs font-medium">
                   <div className="flex items-center gap-1.5">
-                    <div className="w-4 h-4 bg-[#84cc16] border border-white/20 rounded-sm shadow-sm" />
-                    <span className="text-slate-200">= En ejecución</span>
+                    <div className="w-4 h-4 bg-[#84cc16] border border-white/20 rounded-sm shadow-sm flex items-center justify-center text-[9px] font-black text-slate-950">
+                      x
+                    </div>
+                    <span className="text-slate-200">= En ejecución ('x' inicio de quantum)</span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <div className="w-4 h-4 bg-[#facc15] border border-white/20 rounded-sm shadow-sm" />
@@ -1001,7 +1099,7 @@ export function App() {
                   </div>
                   <div className="flex items-center gap-1.5">
                     <div className="w-4 h-4 bg-[#f97316] border border-white/20 rounded-sm shadow-sm" />
-                    <span className="text-slate-200">= En espera de E/S (Bloqueado)</span>
+                    <span className="text-slate-200">= En bloqueo (Naranja)</span>
                   </div>
                 </div>
               </div>
@@ -1009,7 +1107,7 @@ export function App() {
               {/* Matriz del Diagrama de Gantt */}
               <div className="overflow-x-auto pb-2">
                 <div className="min-w-fit font-mono text-xs">
-                  {/* Fila de números de ticks (1, 2, 3, ... 30) */}
+                  {/* Fila de números de ticks (0, 1, 2, ... 30) */}
                   <div className="flex items-center mb-1">
                     <div className="w-28 sm:w-32 flex-shrink-0 text-slate-400 font-bold text-right pr-3 font-sans text-xs">
                       Ticks:
@@ -1028,7 +1126,7 @@ export function App() {
                     </div>
                   </div>
 
-                  {/* Filas por cada proceso (Proceso A, Proceso B, etc.) */}
+                  {/* Filas por cada proceso (A, B, C, etc.) */}
                   <div className="space-y-1">
                     {uniqueProcessList.map(procName => (
                       <div key={procName} className="flex items-center">
@@ -1054,15 +1152,19 @@ export function App() {
                               titleText = `Tick #${t} - ${procName}: En espera (Listo)`;
                             } else if (state === 'BLOQUEADO') {
                               bgClass = 'bg-[#f97316] border-[#f97316] shadow-sm';
-                              titleText = `Tick #${t} - ${procName}: En espera de E/S (Bloqueado)`;
+                              titleText = `Tick #${t} - ${procName}: En espera de CPU / Bloqueado`;
                             }
 
                             return (
                               <div
                                 key={t}
-                                className={`w-6 h-6 border rounded-sm transition-colors duration-150 flex items-center justify-center ${bgClass}`}
+                                className={`w-6 h-6 border rounded-sm transition-colors duration-150 flex items-center justify-center font-bold text-xs ${bgClass}`}
                                 title={titleText}
-                              />
+                              >
+                                {state === 'EJECUCION' && entry?.isQuantumStart?.[procName] && (
+                                  <span className="text-[11px] font-black text-slate-950 select-none">x</span>
+                                )}
+                              </div>
                             );
                           })}
                         </div>
@@ -1194,13 +1296,34 @@ export function App() {
                     <div
                       key={p.id}
                       onClick={() => setSelectedProcessId(p.id)}
-                      className="p-2.5 rounded-xl border border-amber-500/40 bg-amber-950/30 text-xs space-y-1"
+                      className={`p-2.5 rounded-xl border transition cursor-pointer text-xs space-y-1.5 ${
+                        selectedProcessId === p.id
+                          ? 'border-amber-400 bg-amber-950/60 ring-1 ring-amber-400'
+                          : 'border-amber-500/40 bg-amber-950/30 hover:border-amber-400'
+                      }`}
                     >
-                      <div className="font-bold text-white">{p.name}</div>
+                      <div className="flex justify-between items-center font-bold text-white">
+                        <span>{p.name}</span>
+                        {p.blockReason === 'PAGE_FAULT' ? (
+                          <span className="text-[10px] font-mono bg-red-500/20 text-red-300 border border-red-500/40 px-1.5 py-0.5 rounded">
+                            ⚠️ Fallo Página (Disco)
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.5 rounded">
+                            ⚡ E/S Manual
+                          </span>
+                        )}
+                      </div>
                       <div className="flex justify-between text-[11px] text-amber-300 font-mono">
                         <span>Esperando E/S:</span>
-                        <strong>{p.blockedTicks} ticks</strong>
+                        <strong>{p.blockedTicks} tick(s)</strong>
                       </div>
+                      {p.pageFaultsCount !== undefined && p.pageFaultsCount > 0 && (
+                        <div className="text-[10px] text-slate-400 font-mono flex justify-between">
+                          <span>Fallos de página:</span>
+                          <span className="text-amber-400 font-bold">{p.pageFaultsCount}</span>
+                        </div>
+                      )}
                     </div>
                   ))}
                   {processes.filter(p => p.state === 'BLOQUEADO').length === 0 && (
@@ -1330,9 +1453,16 @@ export function App() {
                     </h3>
                   </div>
                   {inspectedProcess && (
-                    <span className="text-xs text-blue-400 font-bold">
-                      {inspectedProcess.name}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {inspectedProcess.pageFaultsCount !== undefined && inspectedProcess.pageFaultsCount > 0 && (
+                        <span className="text-[10px] font-mono bg-red-950/80 text-red-300 border border-red-500/40 px-2 py-0.5 rounded-full font-bold">
+                          ⚠️ {inspectedProcess.pageFaultsCount} Fallo(s) de Página
+                        </span>
+                      )}
+                      <span className="text-xs text-blue-400 font-bold">
+                        {inspectedProcess.name}
+                      </span>
+                    </div>
                   )}
                 </div>
 
