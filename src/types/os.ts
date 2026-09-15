@@ -9,7 +9,7 @@ export type SchedulerAlgorithm =
   | 'GUARANTEED'
   | 'MULTILEVEL_QUEUE';
 
-export type PageReplacementAlgorithm = 'FIFO' | 'LRU' | 'CLOCK';
+export type PageReplacementAlgorithm = 'FIFO' | 'SECOND_CHANCE' | 'CLOCK';
 
 export interface PageEntry {
   pageNumber: number;

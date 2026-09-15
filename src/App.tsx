@@ -85,14 +85,14 @@ export const PAGE_REPLACEMENT_INFO: Record<
   { name: string; icon: string; desc: string }
 > = {
   CLOCK: {
-    name: 'Reloj / Segunda Oportunidad (Clock)',
+    name: 'Reloj (Clock)',
     icon: '',
-    desc: 'Usa una manecilla circular y un bit de referencia (R=1). Da una segunda oportunidad antes de desalojar.',
+    desc: 'Usa una manecilla circular que barre los marcos. Apaga el bit (R=0) si estaba encendido, o desaloja si ya era 0.',
   },
-  LRU: {
-    name: 'LRU (Least Recently Used)',
+  SECOND_CHANCE: {
+    name: 'Segunda Oportunidad (Second Chance)',
     icon: '',
-    desc: 'Desaloja el marco que lleva más tiempo sin ser consultado o accedido por la CPU.',
+    desc: 'Basado en FIFO. Si la página más antigua tiene R=1, se le da una segunda oportunidad moviéndola al final de la fila con R=0.',
   },
   FIFO: {
     name: 'FIFO (First-In, First-Out)',
@@ -625,8 +625,8 @@ export function App() {
                     onChange={e => setPageReplacement(e.target.value as PageReplacementAlgorithm)}
                     className="w-full bg-slate-900 border border-emerald-500/50 rounded-lg p-2 text-emerald-400 font-bold"
                   >
-                    <option value="CLOCK">Reloj / Segunda Oportunidad (Clock / Second Chance)</option>
-                    <option value="LRU">LRU (Menos usado recientemente)</option>
+                    <option value="SECOND_CHANCE">Segunda Oportunidad</option>
+                    <option value="CLOCK">Reloj (Circular)</option>
                     <option value="FIFO">FIFO (Primero en entrar, primero en salir)</option>
                   </select>
                   <span className="text-[11px] text-emerald-300/90 mt-1 block font-medium">
@@ -1090,8 +1090,8 @@ export function App() {
                     onChange={e => setPageReplacement(e.target.value as PageReplacementAlgorithm)}
                     className="bg-slate-900 border border-slate-700 text-emerald-400 font-bold rounded-lg px-2 py-0.5 focus:outline-none"
                   >
-                    <option value="CLOCK">Reloj (2a Oport.)</option>
-                    <option value="LRU">LRU</option>
+                    <option value="SECOND_CHANCE">2da Oportunidad</option>
+                    <option value="CLOCK">Reloj (Circular)</option>
                     <option value="FIFO">FIFO</option>
                   </select>
                 </div>

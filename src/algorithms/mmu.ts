@@ -64,7 +64,7 @@ export function selectVictimFrame(frames: Frame[], pageReplacement: PageReplacem
     return victim;
   }
 
-  // 2. FIFO y LRU (Reemplazo Global Puro)
+  // 2. FIFO y SEGUNDA OPORTUNIDAD (Reemplazo Global Puro)
   const filledFrames = frames.filter(f => f.processId !== null);
   const candidates = filledFrames.length > 0 ? filledFrames : frames;
 
@@ -74,10 +74,27 @@ export function selectVictimFrame(frames: Frame[], pageReplacement: PageReplacem
       curr.allocatedAtTick < oldest.allocatedAtTick ? curr : oldest
     );
   } else {
-    // LRU: Menor lastAccessTick
-    return candidates.reduce((lru, curr) =>
-      curr.lastAccessTick < lru.lastAccessTick ? curr : lru
-    );
+    // SECOND_CHANCE: Simular una cola FIFO
+    const fifoQueue = [...candidates].sort((a, b) => a.allocatedAtTick - b.allocatedAtTick);
+    
+    // Hasta 2 vueltas por la cola para encontrar una víctima
+    for (let i = 0; i < fifoQueue.length * 2; i++) {
+      const oldest = fifoQueue[0];
+      if (oldest.referenceBit === 1) {
+        // Segunda oportunidad: apagamos el bit, y lo enviamos al fondo de la cola (actualizando su allocatedAtTick)
+        oldest.referenceBit = 0;
+        const maxTick = Math.max(...fifoQueue.map(f => f.allocatedAtTick));
+        oldest.allocatedAtTick = maxTick + 1;
+        
+        // Rotar la cola (sale del frente, entra al fondo)
+        fifoQueue.shift();
+        fifoQueue.push(oldest);
+      } else {
+        return oldest; // Encontrado un bit 0
+      }
+    }
+    
+    return fifoQueue[0];
   }
 }
 
