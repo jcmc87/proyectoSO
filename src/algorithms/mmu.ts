@@ -34,15 +34,11 @@ export function createPageTable(pagesCount: number): PageEntry[] {
  * 2. LRU (El marco menos recientemente usado)
  * 3. CLOCK / Segunda Oportunidad (Manecilla circular con bit de referencia R)
  */
-export function selectVictimFrame(
-  frames: Frame[],
-  algorithm: PageReplacementAlgorithm,
-  currentProcessId: string
-): Frame {
+export function selectVictimFrame(frames: Frame[], pageReplacement: PageReplacementAlgorithm): Frame | null {
   if (frames.length === 0) return frames[0];
 
   // 1. ALGORITMO DEL RELOJ / SEGUNDA OPORTUNIDAD (CLOCK / SECOND CHANCE)
-  if (algorithm === 'CLOCK') {
+  if (pageReplacement === 'CLOCK') {
     const totalFrames = frames.length;
     let iterations = 0;
     // Hasta 2 vueltas completas para garantizar encontrar una víctima
@@ -68,13 +64,11 @@ export function selectVictimFrame(
     return victim;
   }
 
-  // 2. FIFO y LRU
-  const otherProcessFrames = frames.filter(
-    f => f.processId !== null && f.processId !== currentProcessId
-  );
-  const candidates = otherProcessFrames.length > 0 ? otherProcessFrames : frames;
+  // 2. FIFO y LRU (Reemplazo Global Puro)
+  const filledFrames = frames.filter(f => f.processId !== null);
+  const candidates = filledFrames.length > 0 ? filledFrames : frames;
 
-  if (algorithm === 'FIFO') {
+  if (pageReplacement === 'FIFO') {
     // FIFO: Menor allocatedAtTick
     return candidates.reduce((oldest, curr) =>
       curr.allocatedAtTick < oldest.allocatedAtTick ? curr : oldest
@@ -95,72 +89,73 @@ export function checkProcessPageFault(proc: ProcessItem): boolean {
 }
 
 /**
- * Algoritmo de Asignación de Memoria MMU
- * Mapea cada página virtual del proceso activo a un Marco Físico en RAM.
- * Retorna true si hubo al menos una página cargada desde disco (Fallo de Página).
+ * Algoritmo de Asignación de Memoria MMU (Evalúa una sola página por tick)
+ * Mapea la página solicitada a un Marco Físico en RAM.
+ * Retorna true si hubo Fallo de Página ('x'), false si fue Acierto ('//').
  */
 export function assignProcessMemory(
   proc: ProcessItem,
   frames: Frame[],
   allProcesses: ProcessItem[],
   currentTick: number,
-  algorithm: PageReplacementAlgorithm = 'LRU'
+  algorithm: PageReplacementAlgorithm,
+  pageIndex: number
 ): boolean {
-  let hadPageFault = false;
+  const page = proc.pageTable[pageIndex];
 
-  proc.pageTable.forEach(page => {
-    if (page.inRAM && page.frameNumber !== null) {
-      // Ya está en RAM, actualizar bit de referencia (Segunda Oportunidad) y timestamp (LRU)
-      page.referenceBit = 1;
-      page.lastAccessTick = currentTick;
-      const f = frames.find(fr => fr.id === page.frameNumber);
-      if (f) {
-        f.referenceBit = 1;
-        f.lastAccessTick = currentTick;
-      }
-      return;
+  if (page.inRAM && page.frameNumber !== null) {
+    // ACIERTO (HIT) '//'
+    page.referenceBit = 1;
+    page.lastAccessTick = currentTick;
+    const f = frames.find(fr => fr.id === page.frameNumber);
+    if (f) {
+      f.referenceBit = 1;
+      f.lastAccessTick = currentTick;
     }
+    return false; // No hubo fallo
+  }
 
-    hadPageFault = true;
+  // FALLO DE PÁGINA (FAULT) 'x'
+  
+  // 1. Buscar si hay marco libre en RAM
+  let targetFrame = frames.find(f => f.processId === null);
 
-    // 1. Buscar si hay marco libre en RAM
-    let targetFrame = frames.find(f => f.processId === null);
+  // 2. Si no hay marcos libres, aplicar Reemplazo Global (CLOCK, FIFO o LRU)
+  if (!targetFrame) {
+    const victim = selectVictimFrame(frames, algorithm);
+    if (!victim) return true; // Failsafe
+    targetFrame = victim;
 
-    // 2. Si no hay marcos libres, aplicar Reemplazo (CLOCK, FIFO o LRU)
-    if (!targetFrame) {
-      targetFrame = selectVictimFrame(frames, algorithm, proc.id);
-
-      // Desalojar la página del proceso anterior (pasa a inválida / disco)
-      if (targetFrame.processId !== null) {
-        const victimProc = allProcesses.find(p => p.id === targetFrame!.processId);
-        if (victimProc && targetFrame.pageNumber !== null) {
-          const victimPage = victimProc.pageTable[targetFrame.pageNumber];
-          if (victimPage) {
-            victimPage.inRAM = false;
-            victimPage.frameNumber = null;
-            victimPage.referenceBit = 0;
-          }
+    // Desalojar la página del proceso anterior (pasa a inválida / disco)
+    if (targetFrame.processId !== null) {
+      const victimProc = allProcesses.find(p => p.id === targetFrame!.processId);
+      if (victimProc && targetFrame.pageNumber !== null) {
+        const victimPage = victimProc.pageTable[targetFrame.pageNumber];
+        if (victimPage) {
+          victimPage.inRAM = false;
+          victimPage.frameNumber = null;
+          victimPage.referenceBit = 0;
         }
       }
     }
+  }
 
-    // 3. Asignar el marco físico al proceso actual
-    targetFrame.processId = proc.id;
-    targetFrame.processName = proc.name;
-    targetFrame.color = proc.color;
-    targetFrame.pageNumber = page.pageNumber;
-    targetFrame.referenceBit = 1; // Bit R = 1 al cargarse
-    targetFrame.allocatedAtTick = currentTick;
-    targetFrame.lastAccessTick = currentTick;
+  // 3. Asignar el marco físico al proceso actual
+  targetFrame.processId = proc.id;
+  targetFrame.processName = proc.name;
+  targetFrame.color = proc.color;
+  targetFrame.pageNumber = page.pageNumber;
+  targetFrame.referenceBit = 1; // Bit R = 1 al cargarse
+  targetFrame.allocatedAtTick = currentTick;
+  targetFrame.lastAccessTick = currentTick;
 
-    page.inRAM = true;
-    page.frameNumber = targetFrame.id;
-    page.referenceBit = 1;
-    page.allocatedAtTick = currentTick;
-    page.lastAccessTick = currentTick;
-  });
+  page.inRAM = true;
+  page.frameNumber = targetFrame.id;
+  page.referenceBit = 1;
+  page.allocatedAtTick = currentTick;
+  page.lastAccessTick = currentTick;
 
-  return hadPageFault;
+  return true; // Hubo fallo
 }
 
 /**

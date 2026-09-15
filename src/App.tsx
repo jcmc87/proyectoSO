@@ -8,7 +8,7 @@ import type {
   GanttEntry,
 } from './types/os';
 import { executeClockTick } from './algorithms/engine';
-import { getClockHandPointer, resetClockHandPointer, createPageTable } from './algorithms/mmu';
+import { resetClockHandPointer, createPageTable } from './algorithms/mmu';
 import {
   Play,
   Pause,
@@ -34,9 +34,9 @@ import {
 const COLORS = ['#2563EB', '#E11D48', '#059669', '#D97706', '#7C3AED', '#0284C7'];
 
 const INITIAL_SCHEDULE: ScheduledTask[] = [
-  { id: '1', name: 'A', burst: 4, pagesCount: 1, arrivalTime: 2, priority: 1, color: '#84CC16' },
-  { id: '2', name: 'B', burst: 2, pagesCount: 1, arrivalTime: 4, priority: 1, color: '#E11D48' },
-  { id: '3', name: 'C', burst: 4, pagesCount: 1, arrivalTime: 0, priority: 1, color: '#2563EB' },
+  { id: '1', name: 'A', burst: 4, pagesCount: 1, arrivalTime: 2, priority: 2, color: '#84CC16' },
+  { id: '2', name: 'B', burst: 2, pagesCount: 1, arrivalTime: 4, priority: 5, color: '#E11D48' },
+  { id: '3', name: 'C', burst: 4, pagesCount: 1, arrivalTime: 0, priority: 8, color: '#2563EB' },
 ];
 
 export const ALGORITHM_INFO: Record<
@@ -44,39 +44,39 @@ export const ALGORITHM_INFO: Record<
   { name: string; icon: string; desc: string }
 > = {
   ROUND_ROBIN: {
-    name: 'Round Robin (RR)',
-    icon: '🔄',
-    desc: 'Turnos circulares equitativos con tiempo límite de Quantum.',
+    name: 'Round Robin',
+    icon: '',
+    desc: 'Asigna CPU por un Quantum fijo y rota la fila de forma justa. (Apropiativo)',
   },
   SJF: {
     name: 'Proceso Más Corto (SJF)',
-    icon: '⏱️',
-    desc: 'Despacha primero al proceso con menor tiempo de ráfaga restante.',
+    icon: '',
+    desc: 'Despacha primero al proceso con menor tiempo de ráfaga restante. (No Apropiativo)',
   },
   PRIORITY: {
     name: 'Por Prioridad',
-    icon: '⭐',
-    desc: 'Despacha el proceso con mayor jerarquía (Prioridad 1 = Máxima).',
+    icon: '',
+    desc: 'Despacha el proceso con mayor jerarquía (Prioridad 1 = Máxima). (No Apropiativo)',
   },
   MULTILEVEL_QUEUE: {
     name: 'Multicola (MLQ)',
-    icon: '🥞',
-    desc: 'Colas separadas por prioridad: Cola Alta (RR), Media (RR) y Baja (FIFO).',
+    icon: '',
+    desc: 'Colas separadas por prioridad: Cola Alta (RR), Media (RR) y Baja (FIFO). (Apropiativo)',
   },
   GUARANTEED: {
     name: 'Planificación Garantizada',
-    icon: '⚖️',
-    desc: 'Garantiza a cada proceso 1/n de tiempo de CPU desde que llegó.',
+    icon: '',
+    desc: 'Garantiza a cada proceso 1/n de tiempo de CPU desde que llegó. (No Apropiativo)',
   },
   LOTTERY: {
     name: 'Por Sorteo / Lotería',
-    icon: '🎟️',
-    desc: 'Sorteo aleatorio ponderado según los boletos ganados por prioridad.',
+    icon: '',
+    desc: 'Sorteo aleatorio ponderado según los boletos ganados por prioridad. (Apropiativo)',
   },
   FIFO: {
     name: 'FIFO / FCFS',
-    icon: '➡️',
-    desc: 'Primero en llegar, primero en ser atendido sin interrupción.',
+    icon: '',
+    desc: 'Primero en llegar, primero en ser atendido sin interrupción. (No Apropiativo)',
   },
 };
 
@@ -86,17 +86,17 @@ export const PAGE_REPLACEMENT_INFO: Record<
 > = {
   CLOCK: {
     name: 'Reloj / Segunda Oportunidad (Clock)',
-    icon: '⏰',
+    icon: '',
     desc: 'Usa una manecilla circular y un bit de referencia (R=1). Da una segunda oportunidad antes de desalojar.',
   },
   LRU: {
     name: 'LRU (Least Recently Used)',
-    icon: '🧠',
+    icon: '',
     desc: 'Desaloja el marco que lleva más tiempo sin ser consultado o accedido por la CPU.',
   },
   FIFO: {
     name: 'FIFO (First-In, First-Out)',
-    icon: '➡️',
+    icon: '',
     desc: 'Desaloja la página más antigua cargada en memoria física en orden estricto de llegada.',
   },
 };
@@ -112,7 +112,7 @@ export function App() {
   const [algorithm, setAlgorithm] = useState<SchedulerAlgorithm>('ROUND_ROBIN');
   const [pageReplacement, setPageReplacement] = useState<PageReplacementAlgorithm>('CLOCK');
   const [quantum, setQuantum] = useState<number>(2);
-  const [totalFramesCount, setTotalFramesCount] = useState<number>(8);
+  const [totalFramesCount, setTotalFramesCount] = useState<number>(4);
   const [pageSizeKB, setPageSizeKB] = useState<number>(4);
   const [clockSpeedMs, setClockSpeedMs] = useState<number>(800);
 
@@ -129,11 +129,19 @@ export function App() {
   // =========================================================================
   // PANTALLA 3: ESTADO DEL EMULADOR EN VIVO & DIAGRAMA DE GANTT
   // =========================================================================
+  interface MemoryHistoryEntry {
+    tick: number;
+    referenceName: string | null;
+    frames: Frame[];
+    status: 'FAULT' | 'HIT' | null;
+  }
+
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [currentTick, setCurrentTick] = useState<number>(0);
   const [selectedProcessId, setSelectedProcessId] = useState<string | null>(null);
   const [processes, setProcesses] = useState<ProcessItem[]>([]);
   const [ganttHistory, setGanttHistory] = useState<GanttEntry[]>([]);
+  const [memoryHistory, setMemoryHistory] = useState<MemoryHistoryEntry[]>([]);
   const [frames, setFrames] = useState<Frame[]>(() =>
     Array.from({ length: 8 }, (_, i) => ({
       id: i,
@@ -229,8 +237,14 @@ export function App() {
     // Registrar estado del Diagrama de Gantt para este tick
     const tickStates: Record<string, 'EJECUCION' | 'LISTO' | 'BLOQUEADO' | 'INACTIVO'> = {};
     const isQuantumStart: Record<string, boolean> = {};
+    const arrivals: Record<string, boolean> = {};
 
     stateRef.current.scheduledTasks.forEach(task => {
+      // Marca de llegada: si el tick actual coincide con el arrivalTime del proceso
+      if (task.arrivalTime === tickToRecord) {
+        arrivals[task.name] = true;
+      }
+
       if (result.executedProcessName === task.name) {
         tickStates[task.name] = 'EJECUCION';
         const proc = result.processes.find(p => p.name === task.name);
@@ -244,11 +258,19 @@ export function App() {
             tickStates[task.name] = 'INACTIVO';
           } else if (proc.state === 'BLOQUEADO') {
             tickStates[task.name] = 'BLOQUEADO';
+          } else if (task.arrivalTime > tickToRecord) {
+            // El proceso aún no ha llegado al sistema
+            tickStates[task.name] = 'INACTIVO';
           } else {
             tickStates[task.name] = 'LISTO';
           }
         } else {
-          tickStates[task.name] = 'LISTO';
+          // El proceso aún no fue incorporado al engine
+          if (task.arrivalTime > tickToRecord) {
+            tickStates[task.name] = 'INACTIVO';
+          } else {
+            tickStates[task.name] = 'LISTO';
+          }
         }
       }
     });
@@ -257,6 +279,14 @@ export function App() {
       tick: tickToRecord,
       states: tickStates,
       isQuantumStart,
+      arrivals,
+    };
+
+    const newMemEntry: MemoryHistoryEntry = {
+      tick: tickToRecord,
+      referenceName: result.referencedPageName || null,
+      frames: result.frames.map(f => ({ ...f })),
+      status: result.memoryStatus
     };
 
     setCurrentTick(result.nextTick);
@@ -266,6 +296,17 @@ export function App() {
       const filtered = prev.filter(e => e.tick !== tickToRecord);
       return [...filtered, newGanttEntry];
     });
+    setMemoryHistory(prev => {
+      const filtered = prev.filter(e => e.tick !== tickToRecord);
+      return [...filtered, newMemEntry];
+    });
+
+    // AUTO-STOP: Detener el reloj si todos los procesos han terminado
+    const allFinished = result.processes.length > 0 &&
+      result.processes.every(p => p.state === 'TERMINADO');
+    if (allFinished) {
+      setIsRunning(false);
+    }
   };
 
   // Temporizador con setInterval
@@ -290,6 +331,7 @@ export function App() {
     resetClockHandPointer();
     setProcesses(createInitialProcesses());
     setGanttHistory([]);
+    setMemoryHistory([]);
     setFrames(
       Array.from({ length: totalFramesCount }, (_, i) => ({
         id: i,
@@ -358,6 +400,12 @@ export function App() {
     setScheduledTasks(prev => prev.filter(item => item.id !== id));
   };
 
+  const updateScheduleItem = (id: string, field: keyof ScheduledTask, value: string | number) => {
+    setScheduledTasks(prev => prev.map(item =>
+      item.id === id ? { ...item, [field]: value } : item
+    ));
+  };
+
   // Iniciar la emulación desde la pantalla 2
   const startEmulation = () => {
     setIsRunning(false);
@@ -382,12 +430,7 @@ export function App() {
     setIsRunning(true);
   };
 
-  // Proceso activo o seleccionado para ver su tabla de páginas
-  const inspectedProcess = selectedProcessId
-    ? processes.find(p => p.id === selectedProcessId)
-    : processes.find(p => p.state === 'EJECUCION') || processes[0];
 
-  const currentClockPointer = getClockHandPointer();
 
   // Número total de columnas para el Diagrama de Gantt (mínimo 30 comenzando en 0)
   const totalGanttColumns = Math.max(30, currentTick + 2);
@@ -582,9 +625,9 @@ export function App() {
                     onChange={e => setPageReplacement(e.target.value as PageReplacementAlgorithm)}
                     className="w-full bg-slate-900 border border-emerald-500/50 rounded-lg p-2 text-emerald-400 font-bold"
                   >
-                    <option value="CLOCK">⏰ Reloj / Segunda Oportunidad (Clock / Second Chance)</option>
-                    <option value="LRU">🧠 LRU (Menos usado recientemente)</option>
-                    <option value="FIFO">➡️ FIFO (Primero en entrar, primero en salir)</option>
+                    <option value="CLOCK">Reloj / Segunda Oportunidad (Clock / Second Chance)</option>
+                    <option value="LRU">LRU (Menos usado recientemente)</option>
+                    <option value="FIFO">FIFO (Primero en entrar, primero en salir)</option>
                   </select>
                   <span className="text-[11px] text-emerald-300/90 mt-1 block font-medium">
                     {PAGE_REPLACEMENT_INFO[pageReplacement].desc}
@@ -608,20 +651,20 @@ export function App() {
                     onChange={e => setAlgorithm(e.target.value as SchedulerAlgorithm)}
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-blue-400 font-bold"
                   >
-                    <option value="FIFO">➡️ FIFO / FCFS (Orden de llegada)</option>
-                    <option value="ROUND_ROBIN">🔄 Round Robin (Apropiativo por Quantum)</option>
-                    <option value="SJF">⏱️ Proceso Más Corto (Shortest Job First / SJF)</option>
-                    <option value="PRIORITY">⭐ Por Prioridad (1 = Máxima)</option>
-                    <option value="MULTILEVEL_QUEUE">🥞 Multicola / Colas Multinivel (MLQ)</option>
-                    <option value="GUARANTEED">⚖️ Planificación Garantizada (Equitativa 1/n)</option>
-                    <option value="LOTTERY">🎟️ Planificación por Sorteo / Lotería</option>
+                    <option value="FIFO">FIFO / FCFS (Orden de llegada)</option>
+                    <option value="ROUND_ROBIN">Round Robin (Apropiativo por Quantum)</option>
+                    <option value="SJF">Proceso Más Corto (Shortest Job First / SJF)</option>
+                    <option value="PRIORITY">Por Prioridad (1 = Máxima)</option>
+                    <option value="MULTILEVEL_QUEUE">Multicola / Colas Multinivel (MLQ)</option>
+                    <option value="GUARANTEED">Planificación Garantizada (Equitativa 1/n)</option>
+                    <option value="LOTTERY">Planificación por Sorteo / Lotería</option>
                   </select>
                   <span className="text-[11px] text-amber-300/90 mt-1 block font-medium">
                     {ALGORITHM_INFO[algorithm].desc}
                   </span>
                 </div>
 
-                {(algorithm === 'ROUND_ROBIN' || algorithm === 'MULTILEVEL_QUEUE') && (
+                {(algorithm === 'ROUND_ROBIN' || algorithm === 'MULTILEVEL_QUEUE' || algorithm === 'LOTTERY') && (
                   <div>
                     <label className="block text-slate-300 font-semibold mb-1">
                       Quantum de CPU (Turno límite):
@@ -712,18 +755,18 @@ export function App() {
                     onChange={e => setAlgorithm(e.target.value as SchedulerAlgorithm)}
                     className="bg-slate-900 border border-blue-700 text-blue-300 font-bold text-xs rounded-lg px-3 py-1.5 focus:outline-none"
                   >
-                    <option value="FIFO">➡️ FIFO / FCFS</option>
-                    <option value="ROUND_ROBIN">🔄 Round Robin</option>
-                    <option value="SJF">⏱️ Proceso Más Corto (SJF)</option>
-                    <option value="PRIORITY">⭐ Por Prioridad</option>
-                    <option value="MULTILEVEL_QUEUE">🥞 Multicola (MLQ)</option>
-                    <option value="GUARANTEED">⚖️ Planificación Garantizada</option>
-                    <option value="LOTTERY">🎟️ Por Sorteo / Lotería</option>
+                    <option value="FIFO">FIFO / FCFS</option>
+                    <option value="ROUND_ROBIN">Round Robin</option>
+                    <option value="SJF">Proceso Más Corto (SJF)</option>
+                    <option value="PRIORITY">Por Prioridad</option>
+                    <option value="MULTILEVEL_QUEUE">Multicola (MLQ)</option>
+                    <option value="GUARANTEED">Planificación Garantizada</option>
+                    <option value="LOTTERY">Por Sorteo / Lotería</option>
                   </select>
                 </div>
 
-                {/* Si es Round Robin o Multicola, solicitar el Quantum */}
-                {(algorithm === 'ROUND_ROBIN' || algorithm === 'MULTILEVEL_QUEUE') && (
+                {/* Si es Round Robin, Multicola o Lotería, solicitar el Quantum */}
+                {(algorithm === 'ROUND_ROBIN' || algorithm === 'MULTILEVEL_QUEUE' || algorithm === 'LOTTERY') && (
                   <div className="flex items-center gap-2 bg-slate-900/90 px-3 py-1 rounded-lg border border-amber-500/50 shadow-sm">
                     <span className="text-xs text-amber-300 font-bold">Quantum (q):</span>
                     <input
@@ -746,45 +789,10 @@ export function App() {
 
             {/* Formulario para agregar tarea */}
             <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="font-bold text-xs text-emerald-400 flex items-center gap-1.5">
-                  <Plus className="w-4 h-4" />
-                  Agregar Nueva Tarea a la Secuencia
-                </h3>
-
-                {/* Presets rápidos */}
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="text-slate-500">Plantillas de prueba:</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setScheduledTasks([
-                        { id: '1', name: 'A', burst: 4, pagesCount: 1, arrivalTime: 2, priority: 1, color: '#84CC16' },
-                        { id: '2', name: 'B', burst: 2, pagesCount: 1, arrivalTime: 4, priority: 1, color: '#E11D48' },
-                        { id: '3', name: 'C', burst: 4, pagesCount: 1, arrivalTime: 0, priority: 1, color: '#2563EB' },
-                      ]);
-                      setAlgorithm('ROUND_ROBIN');
-                      setQuantum(2);
-                    }}
-                    className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg font-bold border border-amber-500/40 shadow-sm"
-                  >
-                    ⭐ Ejemplo Imagen (Q=2: A, B, C)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setScheduledTasks([
-                      { id: '1', name: 'Proceso A', burst: 7, pagesCount: 2, arrivalTime: 0, priority: 3, color: '#84CC16' },
-                      { id: '2', name: 'Proceso B', burst: 5, pagesCount: 3, arrivalTime: 2, priority: 1, color: '#E11D48' },
-                      { id: '3', name: 'Proceso C', burst: 10, pagesCount: 2, arrivalTime: 2, priority: 4, color: '#2563EB' },
-                      { id: '4', name: 'Proceso D', burst: 4, pagesCount: 2, arrivalTime: 6, priority: 2, color: '#D97706' },
-                      { id: '5', name: 'Proceso E', burst: 1, pagesCount: 1, arrivalTime: 7, priority: 5, color: '#059669' },
-                    ])}
-                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg"
-                  >
-                    Estándar (5 procesos)
-                  </button>
-                </div>
-              </div>
+              <h3 className="font-bold text-xs text-emerald-400 flex items-center gap-1.5">
+                <Plus className="w-4 h-4" />
+                Agregar Nueva Tarea a la Secuencia
+              </h3>
 
               <form onSubmit={handleAddSchedule} className="grid grid-cols-2 sm:grid-cols-6 gap-2.5 text-xs">
                 <div className="sm:col-span-2">
@@ -797,9 +805,10 @@ export function App() {
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-medium"
                     required
                   />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">Identificador del proceso</span>
                 </div>
                 <div>
-                  <label className="block text-[11px] text-slate-400 font-semibold mb-1">Ráfaga CPU (s):</label>
+                  <label className="block text-[11px] text-slate-400 font-semibold mb-1">Rafaga CPU:</label>
                   <input
                     type="number"
                     min="1"
@@ -808,9 +817,10 @@ export function App() {
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-mono"
                     required
                   />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">Tiempo total en CPU (ticks)</span>
                 </div>
                 <div>
-                  <label className="block text-[11px] text-slate-400 font-semibold mb-1">Páginas RAM:</label>
+                  <label className="block text-[11px] text-slate-400 font-semibold mb-1">Paginas RAM:</label>
                   <input
                     type="number"
                     min="1"
@@ -820,9 +830,10 @@ export function App() {
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-mono"
                     required
                   />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">Marcos de memoria que ocupa</span>
                 </div>
                 <div>
-                  <label className="block text-[11px] text-slate-400 font-semibold mb-1">Llegada (\(t\)):</label>
+                  <label className="block text-[11px] text-slate-400 font-semibold mb-1">Llegada (t):</label>
                   <input
                     type="number"
                     min="0"
@@ -831,6 +842,7 @@ export function App() {
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-mono"
                     required
                   />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">Tick en que entra al sistema</span>
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-400 font-semibold mb-1">Prioridad (1-10):</label>
@@ -843,6 +855,7 @@ export function App() {
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-mono"
                     required
                   />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">1 = maxima, 10 = minima</span>
                 </div>
                 <div className="col-span-2 sm:col-span-6">
                   <button
@@ -862,57 +875,103 @@ export function App() {
                 <span className="font-bold text-slate-300">
                   Tareas Programadas ({scheduledTasks.length}):
                 </span>
-                <span className="text-slate-500 font-mono">Ordenadas por instante de llegada (\(t\))</span>
               </div>
 
               <div className="overflow-x-auto rounded-xl border border-slate-800">
-                <table className="w-full text-left text-xs font-mono">
-                  <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] border-b border-slate-800">
-                    <tr>
-                      <th className="p-2.5">Llegada (\(t\))</th>
-                      <th className="p-2.5">Proceso / Instancia</th>
-                      <th className="p-2.5">Ráfaga CPU</th>
-                      <th className="p-2.5">Páginas Requeridas</th>
-                      <th className="p-2.5">Prioridad</th>
-                      <th className="p-2.5 text-right">Acción</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800 bg-slate-950/40">
-                    {scheduledTasks.map(item => (
-                      <tr key={item.id} className="hover:bg-slate-800/40 transition">
-                        <td className="p-2.5 font-bold text-emerald-400">t = {item.arrivalTime}</td>
-                        <td className="p-2.5 font-bold text-white flex items-center gap-2">
-                          <div className="w-3 h-3 rounded-full shadow-sm" style={{ backgroundColor: item.color }} />
-                          <span>{item.name}</span>
-                        </td>
-                        <td className="p-2.5 text-slate-300">{item.burst}s ({item.burst} ticks)</td>
-                        <td className="p-2.5 text-indigo-300">{item.pagesCount} páginas ({item.pagesCount * pageSizeKB} KB)</td>
-                        <td className="p-2.5 text-amber-400 font-bold">
-                          Nivel {item.priority}
-                          <span className="text-[10px] text-slate-500 ml-1">
-                            ({item.priority <= 3 ? 'Alta' : item.priority <= 6 ? 'Media' : 'Baja'})
-                          </span>
-                        </td>
-                        <td className="p-2.5 text-right">
-                          <button
-                            onClick={() => removeScheduleItem(item.id)}
-                            className="p-1 text-slate-500 hover:text-rose-400 rounded transition"
-                            title="Eliminar"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                    {scheduledTasks.length === 0 && (
-                      <tr>
-                        <td colSpan={6} className="text-center py-6 text-slate-600">
-                          No hay tareas en la lista. Agrega una arriba o carga una plantilla.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                {(() => {
+                  const totalTickets = scheduledTasks.reduce((sum, item) => sum + item.priority, 0);
+                  return (
+                    <table className="w-full text-left text-xs font-mono">
+                      <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] border-b border-slate-800">
+                        <tr>
+                          <th className="p-2.5">Llegada (t)</th>
+                          <th className="p-2.5">Proceso</th>
+                          <th className="p-2.5">Rafaga CPU</th>
+                          <th className="p-2.5">Paginas</th>
+                          <th className="p-2.5">
+                            {algorithm === 'LOTTERY' ? 'Prioridad / Tiquetes' : 'Prioridad (1-10)'}
+                          </th>
+                          <th className="p-2.5 text-right">Accion</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800 bg-slate-950/40">
+                        {scheduledTasks.map(item => (
+                          <tr key={item.id} className="hover:bg-slate-800/40 transition">
+                            <td className="p-2.5">
+                              <input
+                                type="number"
+                                min="0"
+                                value={item.arrivalTime}
+                                onChange={(e) => updateScheduleItem(item.id, 'arrivalTime', Number(e.target.value))}
+                                className="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-emerald-400 font-bold"
+                              />
+                            </td>
+                            <td className="p-2.5 font-bold text-white flex items-center gap-2">
+                              <div className="w-3 h-3 rounded-full shadow-sm" style={{ backgroundColor: item.color }} />
+                              <input
+                                type="text"
+                                value={item.name}
+                                onChange={(e) => updateScheduleItem(item.id, 'name', e.target.value)}
+                                className="w-24 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-white"
+                              />
+                            </td>
+                            <td className="p-2.5">
+                              <input
+                                type="number"
+                                min="1"
+                                value={item.burst}
+                                onChange={(e) => updateScheduleItem(item.id, 'burst', Number(e.target.value))}
+                                className="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-300"
+                              />
+                            </td>
+                            <td className="p-2.5">
+                              <input
+                                type="number"
+                                min="1"
+                                max="6"
+                                value={item.pagesCount}
+                                onChange={(e) => updateScheduleItem(item.id, 'pagesCount', Number(e.target.value))}
+                                className="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-indigo-300"
+                              />
+                            </td>
+                            <td className="p-2.5">
+                              <div className="flex flex-col gap-1">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={item.priority}
+                                  onChange={(e) => updateScheduleItem(item.id, 'priority', Number(e.target.value))}
+                                  className="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-amber-400 font-bold"
+                                />
+                                {algorithm === 'LOTTERY' && (
+                                  <span className="text-[10px] text-slate-500 font-bold">
+                                    {item.priority} tiquetes ({Math.round((item.priority / Math.max(1, totalTickets)) * 100)}%)
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="p-2.5 text-right">
+                              <button
+                                onClick={() => removeScheduleItem(item.id)}
+                                className="p-1 text-slate-500 hover:text-rose-400 rounded transition"
+                                title="Eliminar"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                        {scheduledTasks.length === 0 && (
+                          <tr>
+                            <td colSpan={6} className="text-center py-6 text-slate-600">
+                              No hay tareas en la lista. Agrega una arriba.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  );
+                })()}
               </div>
             </div>
 
@@ -1001,15 +1060,15 @@ export function App() {
                     onChange={e => setAlgorithm(e.target.value as SchedulerAlgorithm)}
                     className="bg-slate-900 border border-slate-700 text-blue-400 font-bold rounded-lg px-2 py-0.5 focus:outline-none"
                   >
-                    <option value="FIFO">➡️ FIFO</option>
-                    <option value="ROUND_ROBIN">🔄 Round Robin</option>
-                    <option value="SJF">⏱️ SJF</option>
-                    <option value="PRIORITY">⭐ Prioridad</option>
-                    <option value="MULTILEVEL_QUEUE">🥞 Multicola</option>
-                    <option value="GUARANTEED">⚖️ Garantizada</option>
-                    <option value="LOTTERY">🎟️ Sorteo</option>
+                    <option value="FIFO">FIFO</option>
+                    <option value="ROUND_ROBIN">Round Robin</option>
+                    <option value="SJF">SJF</option>
+                    <option value="PRIORITY">Prioridad</option>
+                    <option value="MULTILEVEL_QUEUE">Multicola</option>
+                    <option value="GUARANTEED">Garantizada</option>
+                    <option value="LOTTERY">Sorteo</option>
                   </select>
-                  {(algorithm === 'ROUND_ROBIN' || algorithm === 'MULTILEVEL_QUEUE') && (
+                  {(algorithm === 'ROUND_ROBIN' || algorithm === 'MULTILEVEL_QUEUE' || algorithm === 'LOTTERY') && (
                     <div className="flex items-center gap-1 pl-1 border-l border-slate-800">
                       <span className="text-amber-400 font-bold">Q:</span>
                       <input
@@ -1031,9 +1090,9 @@ export function App() {
                     onChange={e => setPageReplacement(e.target.value as PageReplacementAlgorithm)}
                     className="bg-slate-900 border border-slate-700 text-emerald-400 font-bold rounded-lg px-2 py-0.5 focus:outline-none"
                   >
-                    <option value="CLOCK">⏰ Reloj (2ª Oport.)</option>
-                    <option value="LRU">🧠 LRU</option>
-                    <option value="FIFO">➡️ FIFO</option>
+                    <option value="CLOCK">Reloj (2a Oport.)</option>
+                    <option value="LRU">LRU</option>
+                    <option value="FIFO">FIFO</option>
                   </select>
                 </div>
               </div>
@@ -1101,6 +1160,12 @@ export function App() {
                     <div className="w-4 h-4 bg-[#f97316] border border-white/20 rounded-sm shadow-sm" />
                     <span className="text-slate-200">= En bloqueo (Naranja)</span>
                   </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-4 h-4 border border-white/20 rounded-sm shadow-sm flex items-center justify-center text-[10px] font-black text-white">
+                      ▼
+                    </div>
+                    <span className="text-slate-200">= Llegada al sistema (arrivalTime)</span>
+                  </div>
                 </div>
               </div>
 
@@ -1140,19 +1205,41 @@ export function App() {
                           {ganttTicksArray.map(t => {
                             const entry = ganttHistory.find(g => g.tick === t);
                             const state = entry ? entry.states[procName] : undefined;
+                            const isArrival = entry?.arrivals?.[procName] === true;
 
                             let bgClass = 'bg-slate-900/40 border-slate-700/80';
                             let titleText = `Tick #${t} - ${procName}: Sin actividad`;
 
-                            if (state === 'EJECUCION') {
+                            let displayState = state;
+                            if (state === 'LISTO') {
+                              // Según el usuario, si ya comenzó a ejecutarse y se interrumpe, el tiempo de espera debe ser "Bloqueado" (Naranja)
+                              const hasExecutedBefore = ganttHistory.some(g => g.tick < t && g.states[procName] === 'EJECUCION');
+                              if (hasExecutedBefore) {
+                                displayState = 'BLOQUEADO';
+                              }
+                            }
+
+                            if (displayState === 'EJECUCION') {
                               bgClass = 'bg-[#84cc16] border-[#84cc16] shadow-sm';
                               titleText = `Tick #${t} - ${procName}: En ejecución (CPU)`;
-                            } else if (state === 'LISTO') {
+                            } else if (displayState === 'LISTO') {
                               bgClass = 'bg-[#facc15] border-[#facc15] shadow-sm';
                               titleText = `Tick #${t} - ${procName}: En espera (Listo)`;
-                            } else if (state === 'BLOQUEADO') {
+                            } else if (displayState === 'BLOQUEADO') {
                               bgClass = 'bg-[#f97316] border-[#f97316] shadow-sm';
-                              titleText = `Tick #${t} - ${procName}: En espera de CPU / Bloqueado`;
+                              titleText = `Tick #${t} - ${procName}: En bloqueo (Interrumpido / Esperando)`;
+                            }
+
+                            if (isArrival) {
+                              titleText += ' | ▼ Llegada al sistema';
+                            }
+                            
+                            // Si el proceso ya terminó, no renderizar la celda para que el diagrama se detenga.
+
+                            // Validar si el proceso finalizó verificando si hay actividad pasada
+                            const isPastArrival = ganttHistory.some(g => g.tick <= t && g.arrivals?.[procName]);
+                            if (state === 'INACTIVO' && isPastArrival) {
+                                return null;
                             }
 
                             return (
@@ -1161,8 +1248,13 @@ export function App() {
                                 className={`w-6 h-6 border rounded-sm transition-colors duration-150 flex items-center justify-center font-bold text-xs ${bgClass}`}
                                 title={titleText}
                               >
-                                {state === 'EJECUCION' && entry?.isQuantumStart?.[procName] && (
-                                  <span className="text-[11px] font-black text-slate-950 select-none">x</span>
+                                {/* Marca de llegada ▼ tiene prioridad visual */}
+                                {isArrival ? (
+                                  <span className="text-[11px] font-black text-white select-none drop-shadow-md">▼</span>
+                                ) : (
+                                  state === 'EJECUCION' && entry?.isQuantumStart?.[procName] && (
+                                    <span className="text-[11px] font-black text-slate-950 select-none">x</span>
+                                  )
                                 )}
                               </div>
                             );
@@ -1365,164 +1457,90 @@ export function App() {
               </div>
             </div>
 
-            {/* MMU (Memoria Física RAM y Tabla de Páginas) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Marcos de Memoria Física RAM */}
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Layers className="w-4 h-4 text-emerald-400" />
-                    <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-                      Memoria Física RAM ({totalFramesCount} Marcos)
-                    </h3>
-                  </div>
-                  <div className="flex items-center gap-2 text-[11px] font-mono">
-                    <span className="text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-500/30">
-                      MMU: {PAGE_REPLACEMENT_INFO[pageReplacement].name.split(' ')[0]}
-                    </span>
-                    <span className="text-slate-400">
-                      {frames.filter(f => f.processId !== null).length}/{frames.length} ocupados
-                    </span>
-                  </div>
-                </div>
-
-                {/* Grid de marcos con indicador de Reloj / Segunda Oportunidad */}
-                <div className="grid grid-cols-4 gap-2">
-                  {frames.map(frame => {
-                    const isClockHandHere = pageReplacement === 'CLOCK' && frame.id === currentClockPointer;
-                    return (
-                      <div
-                        key={frame.id}
-                        className={`p-2 rounded-xl border text-center font-mono text-xs flex flex-col justify-between h-24 transition relative ${
-                          isClockHandHere
-                            ? 'ring-2 ring-amber-400 border-amber-400 bg-slate-900 shadow-md shadow-amber-500/20'
-                            : frame.processId !== null
-                            ? 'bg-slate-950 border-emerald-500/50 shadow-sm'
-                            : 'bg-slate-950/40 border-dashed border-slate-800 text-slate-600'
-                        }`}
-                      >
-                        {/* Indicador de Manecilla de Reloj */}
-                        {isClockHandHere && (
-                          <span className="absolute -top-2 -right-1 bg-amber-400 text-slate-950 text-[9px] font-black px-1.5 py-0.2 rounded-full shadow-sm">
-                            ⏰ Manecilla
-                          </span>
-                        )}
-
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10px] text-slate-400 font-bold">Marco #{frame.id}</span>
-                          {/* Bit de Referencia R */}
-                          {frame.processId !== null && (
-                            <span
-                              className={`text-[9px] font-bold px-1 py-0.2 rounded ${
-                                frame.referenceBit === 1
-                                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
-                                  : 'bg-slate-800 text-slate-400'
-                              }`}
-                              title="Bit de Referencia R (Uso)"
-                            >
-                              R={frame.referenceBit}
-                            </span>
-                          )}
-                        </div>
-
-                        {frame.processId !== null ? (
-                          <div>
-                            <div className="font-bold text-white truncate text-[11px]">
-                              {frame.processName}
-                            </div>
-                            <div className="text-[10px] text-emerald-400 font-bold">
-                              Pág #{frame.pageNumber}
-                            </div>
-                          </div>
-                        ) : (
-                          <span className="text-[10px] text-slate-600 font-sans">Libre</span>
-                        )}
-                      </div>
-                    );
-                  })}
+            {/* HISTORIAL DE REEMPLAZO DE PÁGINAS (ESTILO EXCEL) */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg space-y-3 overflow-hidden flex flex-col">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-emerald-400" />
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                    Historial de Paginación ({PAGE_REPLACEMENT_INFO[pageReplacement].name.split(' ')[0]})
+                  </h3>
                 </div>
               </div>
 
-              {/* Tabla de Páginas del Proceso Activo / Inspeccionado */}
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Layers className="w-4 h-4 text-blue-400" />
-                    <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-                      Tabla de Páginas MMU
-                    </h3>
-                  </div>
-                  {inspectedProcess && (
-                    <div className="flex items-center gap-2">
-                      {inspectedProcess.pageFaultsCount !== undefined && inspectedProcess.pageFaultsCount > 0 && (
-                        <span className="text-[10px] font-mono bg-red-950/80 text-red-300 border border-red-500/40 px-2 py-0.5 rounded-full font-bold">
-                          ⚠️ {inspectedProcess.pageFaultsCount} Fallo(s) de Página
-                        </span>
-                      )}
-                      <span className="text-xs text-blue-400 font-bold">
-                        {inspectedProcess.name}
-                      </span>
-                    </div>
-                  )}
-                </div>
+              <div className="overflow-x-auto pb-2 border border-slate-800 rounded-xl bg-slate-950 font-mono text-xs">
+                <table className="w-full text-center border-collapse">
+                  <thead>
+                    {/* FILA DE REFERENCIAS */}
+                    <tr className="bg-slate-900 text-slate-300">
+                      <th className="p-2 border border-slate-800 text-left sticky left-0 bg-slate-900 z-10 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.5)]">Referencia</th>
+                      {memoryHistory.map((entry, idx) => (
+                        <th key={idx} colSpan={2} className="p-2 border border-slate-800 font-bold text-amber-400 min-w-[50px]">
+                          {entry.referenceName || '-'}
+                        </th>
+                      ))}
+                    </tr>
+                    {/* FILA DE SUB-CABECERAS */}
+                    <tr className="bg-slate-900 text-slate-500 text-[10px]">
+                      <th className="p-1 border border-slate-800 sticky left-0 bg-slate-900 z-10 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.5)]"></th>
+                      {memoryHistory.map((_, idx) => (
+                        <React.Fragment key={idx}>
+                          <th className="p-1 border border-slate-800 font-normal">Pág</th>
+                          <th className="p-1 border border-slate-800 font-normal border-r-2 border-r-slate-700">bit</th>
+                        </React.Fragment>
+                      ))}
+                    </tr>
+                  </thead>
+                  
+                  <tbody>
+                    {/* FILAS DE MARCOS */}
+                    {Array.from({ length: totalFramesCount }).map((_, frameIdx) => (
+                      <tr key={frameIdx} className="bg-slate-950">
+                        <td className="p-2 border border-slate-800 text-left font-bold text-slate-300 sticky left-0 bg-slate-900 z-10 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.5)]">
+                          Marco {frameIdx + 1}
+                        </td>
+                        {memoryHistory.map((entry, colIdx) => {
+                          const frame = entry.frames.find(f => f.id === frameIdx);
+                          const isOccupied = frame && frame.processId !== null;
+                          const pageStr = isOccupied ? `${frame.processName}${frame.pageNumber! + 1}` : '-';
+                          const bitStr = isOccupied ? frame.referenceBit : '0';
+                          
+                          const isMatch = isOccupied && entry.referenceName && pageStr === entry.referenceName.replace('-', '');
 
-                {inspectedProcess ? (
-                  <div className="overflow-x-auto rounded-xl border border-slate-800">
-                    <table className="w-full text-left text-xs font-mono">
-                      <thead className="bg-slate-950 text-slate-400 text-[10px] uppercase border-b border-slate-800">
-                        <tr>
-                          <th className="p-2">Página Virtual</th>
-                          <th className="p-2 text-center">Presencia (RAM)</th>
-                          <th className="p-2 text-center">Bit R (Uso)</th>
-                          <th className="p-2 text-right">Marco Físico</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-800 bg-slate-950/50">
-                        {inspectedProcess.pageTable.map(pt => (
-                          <tr key={pt.pageNumber}>
-                            <td className="p-2 font-bold text-white">
-                              Página #{pt.pageNumber}
-                            </td>
-                            <td className="p-2 text-center">
-                              {pt.inRAM ? (
-                                <span className="text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded text-[10px]">
-                                  Válida (En RAM)
-                                </span>
-                              ) : (
-                                <span className="text-amber-400 font-bold bg-amber-950/60 px-2 py-0.5 rounded text-[10px]">
-                                  Inválida (En Disco)
-                                </span>
-                              )}
-                            </td>
-                            <td className="p-2 text-center">
-                              {pt.inRAM ? (
-                                <span
-                                  className={`font-bold px-1.5 py-0.5 rounded text-[10px] ${
-                                    pt.referenceBit === 1
-                                      ? 'bg-emerald-500/20 text-emerald-300'
-                                      : 'bg-slate-800 text-slate-400'
-                                  }`}
-                                >
-                                  {pt.referenceBit === 1 ? 'R=1 (2ª Oport.)' : 'R=0 (Candidato)'}
-                                </span>
-                              ) : (
-                                <span className="text-slate-600">—</span>
-                              )}
-                            </td>
-                            <td className="p-2 text-right font-bold text-emerald-400">
-                              {pt.inRAM && pt.frameNumber !== null ? `Marco #${pt.frameNumber}` : '—'}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="py-8 text-center text-slate-600 text-xs border border-dashed border-slate-800 rounded-xl">
-                    Sin proceso activo para mostrar su tabla
-                  </div>
-                )}
+                          return (
+                            <React.Fragment key={colIdx}>
+                              <td className={`p-2 border border-slate-800 ${isMatch ? 'text-emerald-400 font-bold' : 'text-slate-400'}`}>
+                                {isOccupied ? pageStr : ''}
+                              </td>
+                              <td className={`p-2 border border-slate-800 border-r-2 border-r-slate-700 ${isOccupied ? 'text-lime-500' : 'text-slate-700'}`}>
+                                {isOccupied ? bitStr : '0'}
+                              </td>
+                            </React.Fragment>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+
+                  <tfoot>
+                    {/* FILA DE ESTADO */}
+                    <tr className="bg-slate-900 text-slate-300 font-bold">
+                      <td className="p-2 border border-slate-800 text-left sticky left-0 bg-slate-900 z-10 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.5)]">Estado</td>
+                      {memoryHistory.map((entry, idx) => (
+                        <td key={idx} colSpan={2} className={`p-2 border border-slate-800 border-r-2 border-r-slate-700 ${entry.status === 'FAULT' ? 'text-rose-500' : entry.status === 'HIT' ? 'text-emerald-500' : 'text-slate-600'}`}>
+                          {entry.status === 'FAULT' ? 'x' : entry.status === 'HIT' ? '//' : '-'}
+                        </td>
+                      ))}
+                    </tr>
+                  </tfoot>
+                </table>
               </div>
+              
+              {memoryHistory.length === 0 && (
+                <div className="py-8 text-center text-slate-600 text-xs border border-dashed border-slate-800 rounded-xl">
+                  Inicia la simulación para ver el registro histórico de paginación.
+                </div>
+              )}
             </div>
           </div>
         )}

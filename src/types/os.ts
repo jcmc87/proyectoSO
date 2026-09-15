@@ -1,4 +1,4 @@
-export type ProcessState = 'LISTO' | 'EJECUCION' | 'BLOQUEADO' | 'TERMINADO';
+export type ProcessState = 'LISTO' | 'EJECUCION' | 'BLOQUEADO' | 'TERMINADO' | 'INACTIVO';
 
 export type SchedulerAlgorithm =
   | 'ROUND_ROBIN'
@@ -63,6 +63,7 @@ export interface GanttEntry {
   tick: number;
   states: Record<string, 'EJECUCION' | 'LISTO' | 'BLOQUEADO' | 'INACTIVO'>;
   isQuantumStart?: Record<string, boolean>;
+  arrivals?: Record<string, boolean>;
 }
 
 export interface OSConfig {

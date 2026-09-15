@@ -72,8 +72,8 @@ export function selectLottery(readyQueue: ProcessItem[]): ProcessItem | null {
   let totalTickets = 0;
 
   readyQueue.forEach(proc => {
-    // Cálculo de boletos ponderados: al menos 1 boleto
-    const tickets = Math.max(1, 11 - proc.priority);
+    // Cálculo de boletos: los tickets serán exactamente igual a la prioridad ingresada
+    const tickets = Math.max(1, proc.priority);
     proc.lotteryTickets = tickets;
     ticketRanges.push({
       process: proc,
